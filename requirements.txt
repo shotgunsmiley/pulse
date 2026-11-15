@@ -1,2 +1,0 @@
-# No dependencies needed - Pulse server uses Python stdlib only
-
