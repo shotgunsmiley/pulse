@@ -1,1 +1,1 @@
-# stdlib only - no Flask, no packages needed
+# Pulse server uses Python standard-library modules only.
