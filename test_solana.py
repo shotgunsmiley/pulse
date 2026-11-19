@@ -120,7 +120,7 @@ CH.accounts[str(AUTH.pubkey())] = {'owner': SYSTEM, 'lamports': 2 * 10 ** 9}    
 DATA = tempfile.mktemp(suffix='.json')
 ENV = dict(os.environ, PORT=str(SPORT), PULSE_DATA_FILE=DATA, PULSE_AUTH_LIMIT='1000', PULSE_SOL_SECRET=str(AUTH),
            PULSE_SOL_RPC='http://127.0.0.1:%d' % RPORT, PULSE_SOL_EVERY='0.5', PULSE_SETTLE_EVERY='0.5', PULSE_EPOCH_SECONDS='3',
-           PULSE_UNITS_PER_PLS='1', PULSE_HB_MIN_GAP='0')
+           PULSE_UNITS_PER_PLS='1', PULSE_HB_MIN_GAP='0', PULSE_EPOCH_CAP_PLS='10000000')
 ENV.pop('DATABASE_URL', None)
 BASE = 'http://127.0.0.1:%d' % SPORT
 

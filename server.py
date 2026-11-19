@@ -1749,7 +1749,7 @@ def node_id_for(pem):
 #   handshake  -> the phone signs the nonce; a valid signature proves it holds the key
 #   heartbeat  -> every ~30 s the phone signs (node, seq, time, mining); each accepted,
 #                 eligible heartbeat is one CONTRIBUTION UNIT
-#   settlement -> once an hour (an "epoch") units become PLS rewards in the ledger,
+#   settlement -> every 10 minutes (an "epoch") units become PLS rewards in the ledger,
 #                 exactly once per (epoch, node), with a full issuance record
 #
 # NODE_POLICY decides when a phone counts as an active node:
@@ -1765,10 +1765,11 @@ HB_INTERVAL = int(os.environ.get('PULSE_HB_INTERVAL', '30'))   # seconds the app
 HB_MIN_GAP = int(os.environ.get('PULSE_HB_MIN_GAP', '25'))   # a heartbeat sooner than this after the last counted one is not counted
 HB_CLOCK_SKEW = 120              # phone clock may differ from the server by this much
 MINING_WINDOW = 90               # "actively mining" = a strike within the last 90 s
-EPOCH_SECONDS = int(os.environ.get('PULSE_EPOCH_SECONDS', '3600'))   # rewards settle per hour
+EPOCH_SECONDS = int(os.environ.get('PULSE_EPOCH_SECONDS', '600'))    # rewards settle every 10 minutes
 UNITS_PER_PLS = int(os.environ.get('PULSE_UNITS_PER_PLS', '10'))          # PLACEHOLDER: 10 units (~5 min) = 1 PLS
 DAILY_UNIT_CAP = int(os.environ.get('PULSE_DAILY_UNIT_CAP', '240'))       # PLACEHOLDER: max 2 h of counted node time per player per day
-EPOCH_EMISSION_CAP = int(os.environ.get('PULSE_EPOCH_CAP_PLS', '2000'))   # PLACEHOLDER: max PLS paid to ALL nodes per hour (pro-rata above it)
+EPOCH_EMISSION_CAP = int(os.environ.get('PULSE_EPOCH_CAP_PLS', '2000'))   # PLACEHOLDER: max PLS paid to ALL nodes per HOUR (pro-rata above it);
+                                                                          # each payout period gets its share of it
 MAX_NODES_PER_USER = 3
 NODE_SESSION_TTL = 1800
 CHALLENGE_TTL = 60
@@ -1920,7 +1921,7 @@ def h_node_status(u, q):
     return {'ok': True, 'policy': NODE_POLICY, 'mint_policy': MINT_POLICY, 'interval': HB_INTERVAL, 'units_per_pls': UNITS_PER_PLS, 'daily_cap': DAILY_UNIT_CAP,
             'units_today': sum(n['day_units'] for n in mine if n['day'] == d), 'nodes': nodes,
             'rewards': list(reversed(rewards)), 'total_earned': sum(r['pls'] for r in DB['node_rewards'] if r['uid'] == u['uid']),
-            'next_settlement_in': int(EPOCH_SECONDS - now() % EPOCH_SECONDS)}
+            'next_settlement_in': int(EPOCH_SECONDS - now() % EPOCH_SECONDS), 'payout_minutes': max(1, EPOCH_SECONDS // 60)}
 
 def settle_node_rewards(up_to_epoch=None):
     """Turns contribution units from finished epochs into PLS. Safe to run any number of times:
@@ -1936,7 +1937,7 @@ def settle_node_rewards(up_to_epoch=None):
         rows = by_epoch[ep]
         total_units = sum(x[1] for x in rows)
         raw_pls_milli = total_units * 1000 // UNITS_PER_PLS
-        cap_milli = EPOCH_EMISSION_CAP * 1000
+        cap_milli = EPOCH_EMISSION_CAP * 1000 * EPOCH_SECONDS // 3600      # this period's share of the hourly cap
         num, den = (cap_milli, raw_pls_milli) if raw_pls_milli > cap_milli else (1, 1)
         for n, units in rows:
             key = '%d:%s' % (ep, n['id'])
