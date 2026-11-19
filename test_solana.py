@@ -15,6 +15,18 @@ TOKEN22 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
 ATA = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
 SYSTEM = '11111111111111111111111111111111'
 
+def good_tap(ch):
+    """A human-ish strike: aim for the zone centre, a little early or late."""
+    import random as _r
+    best = None
+    for target in (ch['zone_center'], 2 - ch['zone_center']):
+        t = ((target - ch['offset']) % 2.0) / ch['speed'] * 1000.0
+        while t < 200:
+            t += 2.0 / ch['speed'] * 1000.0
+        best = t if best is None else min(best, t)
+    return int(best + _r.randint(-25, 25))
+
+
 class Chain:
     def __init__(self):
         self.accounts = {}        # addr -> {'owner', 'lamports', 'mint'?, 'auth'?, 'supply'?, 'token_owner'?, 'amount'?}
@@ -220,8 +232,9 @@ def earn(units):
     got = 0
     for _ in range(units):
         r = req('POST', '/mine/start', {'tier': 1}, TOK)
-        time.sleep(0.5)
-        req('POST', '/mine/strike', {'id': r['id'], 'tap_ms': 450}, TOK)
+        tap = good_tap(r['challenge'])
+        time.sleep(tap / 1000.0 + 0.05)
+        req('POST', '/mine/strike', {'id': r['id'], 'tap_ms': tap}, TOK)
         PH.seq += 1
         ts = int(time.time())
         msg = 'pulse-heartbeat:%s:%d:%d:1' % (ST['nid'], PH.seq, ts)

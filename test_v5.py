@@ -70,7 +70,7 @@ ALLOWED_MINT = ('starter grant (one time)', 'node reward', 'test_grant')
 # ---------------------------------------------------------------------------
 def t_version():
     h = S.h_health({})
-    assert h['version'] == 5.0
+    assert h['version'] == 5.1
     assert 'strikeoff' in S.GAMES and 20 in S.STAKES
     return 'v5.0, 4 skill games, %d stake sizes' % len(S.STAKES)
 
@@ -221,7 +221,7 @@ def t_series():
         for u, rt in ((a, sa), (b, sb)):
             p = S.h_pvp_play(u, {'match_id': mid})
             S.CHALLENGES[p['id']]['issued'] -= 60
-            S.h_pvp_submit(u, {'id': p['id'], 'result': {'reactions': [rt] * 5}})
+            S.h_pvp_submit(u, {'id': p['id'], 'result': {'reactions': [rt + random.randint(-12, 12) for _ in range(5)]}})
         S.tick_series()
     play_round(250, 300)
     play_round(300, 250)
@@ -244,7 +244,7 @@ def t_rematch():
     for u, rt in ((a, 250), (b, 300)):
         p = S.h_pvp_play(u, {'match_id': m['id']})
         S.CHALLENGES[p['id']]['issued'] -= 60
-        S.h_pvp_submit(u, {'id': p['id'], 'result': {'reactions': [rt] * 5}})
+        S.h_pvp_submit(u, {'id': p['id'], 'result': {'reactions': [rt + random.randint(-12, 12) for _ in range(5)]}})
     assert m['state'] == 'settled' and m['subs'][a['uid']].get('replay')
     raises('winner_cant', lambda: S.h_rematch(a, {'match_id': m['id']}))
     r = S.h_rematch(b, {'match_id': m['id']})
@@ -297,12 +297,15 @@ def t_fishing():
     for i in range(40):
         c = S.h_fish_cast(u, {})
         u['fishing']['issued'] -= (c['bite_ms'] + 300) / 1000.0
-        r = S.h_fish_reel(u, {'tap_ms': c['bite_ms'] + 200})
+        r = S.h_fish_reel(u, {'tap_ms': c['bite_ms'] + random.randint(180, 420)})
         caught += r['caught']
     assert caught == 40 and sum(u['fish'].values()) == 40 and 'angler' in u['badges']
     c = S.h_fish_cast(u, {})
     u['fishing']['issued'] -= 10
     assert not S.h_fish_reel(u, {'tap_ms': c['bite_ms'] - 100})['caught']
+    c = S.h_fish_cast(u, {})
+    u['fishing']['issued'] -= 10
+    assert not S.h_fish_reel(u, {'tap_ms': c['bite_ms'] + 60})['caught']      # inhumanly fast reel
     return '40/40 caught with good timing, %d species; early reel spooks the fish' % len(u['fish'])
 
 def t_cabin():
@@ -486,7 +489,7 @@ def http_pass():
                 raw = e.read().decode()
                 return e.code, (json.loads(raw) if raw.startswith('{') else raw)
         st, h = call('/health')
-        assert h['version'] == 5.0
+        assert h['version'] == 5.1
         st, r = call('/auth/register', {'username': 'webby', 'password': 'secret123'})
         tok = r['token']
         st, n = call('/network/stats')

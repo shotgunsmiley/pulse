@@ -204,17 +204,27 @@ def t_forge_sinks():
     ledger_ok()
     return 'forge burns PLS, durability wears per strike, repair cost, upgrade stars, broken gear gives no bonus'
 
+def seq_play(u, cid, reached):
+    """Play Rune Sequence round by round against the server (v5.1 reveals one round at a time)."""
+    ch = S.CHALLENGES[cid]['challenge']
+    for n in range(ch['start_len'], reached + 1):
+        ch['seq_t'] -= 60
+        out = S.h_skill_step(u, {'id': cid, 'entered': ch['runes'][:n]})
+        assert out['correct'], out
+    ch['seq_t'] -= 60
+    S.h_skill_step(u, {'id': cid, 'entered': [(x + 1) % 4 for x in ch['runes'][:reached + 1]]})
+
 def play(ch, how='good'):
     """Build a valid result + elapsed time for a skill challenge."""
     g = ch['game']
     if g == 'quickdraw':
-        rts = [230, 250, 210, -1, 300] if how == 'good' else [400, 420, 450, -1, -1]
+        rts = ([230, 250, 210, -1, 300] if how == 'good' else [400, 420, 450, -1, -1])
         return {'reactions': rts}, sum(ch['delays']) + sum(r for r in rts if r > 0) + 200
     if g == 'sequence':
         reached = 9 if how == 'good' else 5
         need = sum(n * (ch['show_ms'] + ch['gap_ms']) for n in range(ch['start_len'], reached + 1))
-        return {'reached': reached}, need + 2000
-    hits = [{'hit': True, 'rt': 300} for _ in ch['targets']] if how == 'good' else [{'hit': i % 2 == 0, 'rt': 500} for i in range(len(ch['targets']))]
+        return {'reached': reached, '_steps': reached}, need + 2000
+    hits = [{'hit': True, 'rt': 300 + (i * 37) % 80 - 40} for i in range(len(ch['targets']))] if how == 'good' else [{'hit': i % 2 == 0, 'rt': 500} for i in range(len(ch['targets']))]
     return {'hits': hits}, sum(t['delay'] for t in ch['targets']) + 12 * 1200
 
 def t_practice():
@@ -223,6 +233,8 @@ def t_practice():
     for g in ['quickdraw', 'sequence', 'sniper']:
         r = S.h_practice_start(u, {'game': g})
         res, el = play(r['challenge'])
+        if g == 'sequence':
+            seq_play(u, r['id'], res['_steps'])
         backdate(r['id'], el / 1000.0)
         s = S.h_practice_submit(u, {'id': r['id'], 'result': res})
         assert s['score'] > 0 and s['new_best'], s
@@ -236,11 +248,8 @@ def t_practice():
     except B as e:
         assert e.code == 'impossible_reaction'
     r = S.h_practice_start(u, {'game': 'sequence'})
-    try:
-        S.h_practice_submit(u, {'id': r['id'], 'result': {'reached': 15}})
-        raise AssertionError('instant sequence accepted')
-    except B as e:
-        assert e.code == 'too_fast'
+    s2 = S.h_practice_submit(u, {'id': r['id'], 'result': {'reached': 15}})
+    assert s2['score'] == 0, s2          # v5.1: a claimed score without playing the rounds counts for nothing
     q = {x['id']: x for x in S.h_quests(u, {})['quests']}
     assert q['skill']['progress'] == 3
     # same seed -> same challenge
@@ -347,6 +356,7 @@ def t_tournament():
         ch = r['challenge']
         reached = 4 + i
         need = sum(n * (ch['show_ms'] + ch['gap_ms']) for n in range(ch['start_len'], reached + 1))
+        seq_play(u, r['id'], reached)
         backdate(r['id'], need / 1000.0 + 1)
         S.h_t_submit(u, {'id': r['id'], 'result': {'reached': reached}})
     t = S.tournament('sequence')
@@ -542,7 +552,7 @@ def http_part():
                 time.sleep(0.05)
         out = []
         st, h = req('GET', '/health')
-        assert st == 200 and h['version'] == 5.0
+        assert st == 200 and h['version'] == 5.1
         st, r = req('POST', '/auth/register', {'username': 'HttpHero', 'password': 'secret123'})
         assert st == 200
         tok = r['token']

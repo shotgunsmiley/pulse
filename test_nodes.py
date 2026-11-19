@@ -106,10 +106,23 @@ T2, UID2 = U2['token'], U2['profile']['uid']
 PH1, PH1B, PH2 = Phone(), Phone(), Phone()
 STATE = {}
 
+
+def good_tap(ch):
+    """A human-ish strike: aim for the zone centre, a little early or late."""
+    import random as _r
+    best = None
+    for target in (ch['zone_center'], 2 - ch['zone_center']):
+        t = ((target - ch['offset']) % 2.0) / ch['speed'] * 1000.0
+        while t < 200:
+            t += 2.0 / ch['speed'] * 1000.0
+        best = t if best is None else min(best, t)
+    return int(best + _r.randint(-25, 25))
+
 def strike(tok):
     r = req('POST', '/mine/start', {'tier': 1}, tok)
-    time.sleep(0.5)
-    s = req('POST', '/mine/strike', {'id': r['id'], 'tap_ms': 450}, tok)
+    tap = good_tap(r['challenge'])
+    time.sleep(tap / 1000.0 + 0.05)
+    s = req('POST', '/mine/strike', {'id': r['id'], 'tap_ms': tap}, tok)
     assert s.get('ok'), s
     time.sleep(0.5)
 

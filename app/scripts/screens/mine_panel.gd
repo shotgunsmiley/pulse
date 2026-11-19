@@ -229,6 +229,11 @@ func _show_result(r: Dictionary) -> void:
 	var colors := {"perfect": UI.GOLD, "great": UI.TEAL_L, "good": UI.TEAL, "miss": UI.RED}
 	var text := q.to_upper() + "!"
 	var w = M.world
+	if r.get("flagged", false) and not M.profile.get("flagged", false):
+		M.profile["flagged"] = true
+		M.toast("Your account is under review: your tapping looked automated. Node pay is paused until a person checks it.", UI.RED)
+	if r.get("taper", 1.0) < 1.0 and info.text.find("tired") < 0:
+		info.text = "Long day: ore x%s" % str(r["taper"])
 	w.hit_fx(tier, q)
 	if q == "miss":
 		text = "MISS - the pick glanced off the rock."

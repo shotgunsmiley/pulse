@@ -21,6 +21,8 @@ var tap_time := 0
 var tap_index := -1
 var accept_input := false
 var aborted := false
+var cid := ""          # server challenge id; Rune Sequence asks the server for each new round
+var seq_runes := []    # the runes revealed so far (Rune Sequence)
 
 
 func run(m, challenge: Dictionary, heading: String) -> void:
@@ -143,20 +145,21 @@ func _sequence() -> void:
 				tap_flag = true
 		)
 		btns.append(b)
-	var runes: Array = ch["runes"]
+	seq_runes = ch["runes"]
+	var online: bool = cid != "" and ch.get("interactive", false)
 	var show_s := float(ch["show_ms"]) / 1000.0
 	var gap_s := float(ch["gap_ms"]) / 1000.0
 	var n := int(ch["start_len"])
 	var reached := 0
 	await get_tree().create_timer(0.8).timeout
-	while n <= runes.size():
+	while n <= seq_runes.size():
 		if aborted:
 			return
 		accept_input = false
 		info.text = "Watch %d runes..." % n
 		await get_tree().create_timer(0.6).timeout
 		for i in range(n):
-			var r := int(runes[i])
+			var r := int(seq_runes[i])
 			btns[r].modulate = Color(1.9, 1.9, 1.9)
 			M.play("rune%d" % r)
 			await get_tree().create_timer(show_s).timeout
@@ -167,6 +170,7 @@ func _sequence() -> void:
 		info.text = "Your turn - repeat all %d" % n
 		accept_input = true
 		var ok := true
+		var entered := []
 		for i in range(n):
 			tap_flag = false
 			tap_index = -1
@@ -177,13 +181,25 @@ func _sequence() -> void:
 				ok = false
 				break
 			var pick := tap_index
+			entered.append(pick)
 			btns[pick].modulate = Color(1.6, 1.6, 1.6)
 			M.play("rune%d" % pick)
 			get_tree().create_timer(0.15).timeout.connect(func(): btns[pick].modulate = Color(1, 1, 1))
-			if pick != int(runes[i]):
+			if pick != int(seq_runes[i]):
 				ok = false
 				break
 		accept_input = false
+		if ok and online:
+			# the server checks the answer and only then reveals the next, longer sequence
+			info.text = "Checking..."
+			var step: Dictionary = await M.api.post("/skill/step", {"id": cid, "entered": entered})
+			if not step.get("ok", false) or not step.get("correct", false):
+				ok = false
+			elif step.get("done", false):
+				reached = n
+				break
+			else:
+				seq_runes = step["runes"]
 		if not ok:
 			info.text = "Wrong rune! You remembered %d." % reached
 			M.play("buzz")

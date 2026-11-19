@@ -837,10 +837,9 @@ def h_mine_strike(u, b):
     d = abs(marker_pos(ch, tap) - ch['zone_center'])
     half = ch['zone_width'] / 2
     q = 'perfect' if d <= half * 0.3 else 'great' if d <= half * 0.65 else 'good' if d <= half else 'miss'
-    # Anti-bot: a long run of near-perfect strikes gets capped at "good".
+    # Anti-bot (v5.1): bots are caught by timing precision and rhythm in d5_security
+    # (a skilled human can land 37 perfects in 40, so a perfect count alone is not proof).
     u['recent_q'] = (u['recent_q'] + [q])[-40:]
-    if len(u['recent_q']) >= 40 and u['recent_q'].count('perfect') >= 37:
-        u['flagged'] = True
     if u['flagged'] and q in ('perfect', 'great'):
         q = 'good'
     roll_counters(u)
@@ -3819,6 +3818,959 @@ def _v5_do_POST(self):
     return _v4_do_POST(self)
 Handler.do_POST = _v5_do_POST
 
+# ===========================================================================
+# PULSE v5.1 SECURITY LAYER - fixes from an attacker's-eye audit.
+#   Network:  real client IP (no X-Forwarded-For spoofing), per-IP rate limits,
+#             connection cap, socket timeouts, cached public pages, bounded memory.
+#   Bots:     auto-clicker and aim-bot detection on mining, node pay only for real
+#             mining, fishing/expedition limits, Rune Sequence revealed round by round,
+#             stricter "humanly possible" checks, result size limits.
+#   Economy:  multi-account limits, no PLS passing between accounts on the same
+#             network, new-account cool-down for trading and staking, fixes for
+#             open listings / rentals / bounties / series / duels being pruned,
+#             rented gear lost to the forge, login brute force, wallet-link guessing.
+# Every setting below can be tuned with an environment variable.
+# ===========================================================================
+VERSION = 5.1
+REQ = threading.local()
+SEC = {'buckets': {}, 'reg': {}, 'login_fail': {}, 'earn_ips': {}, 'cache': {}, 'link_fail': {}, 'last_purge': 0.0}
+
+PROXY_HOPS = int(os.environ.get('PULSE_PROXY_HOPS', '1'))            # Render puts one proxy in front of us
+RATE_PER_SEC = float(os.environ.get('PULSE_RATE_PER_SEC', '10'))      # sustained requests per IP
+RATE_BURST = float(os.environ.get('PULSE_RATE_BURST', '40'))
+MAX_CONNECTIONS = int(os.environ.get('PULSE_MAX_CONNECTIONS', '96'))
+REG_PER_IP_DAY = int(os.environ.get('PULSE_REG_PER_IP_DAY', '4'))
+STARTER_PER_IP_DAY = int(os.environ.get('PULSE_STARTER_PER_IP_DAY', '2'))
+EARNERS_PER_IP = int(os.environ.get('PULSE_EARNERS_PER_IP', '6'))     # accounts earning node pay from one network per period
+NEW_ACCOUNT_HOURS = float(os.environ.get('PULSE_NEW_ACCOUNT_HOURS', '24'))
+MIN_PRACTICE_TO_STAKE = int(os.environ.get('PULSE_MIN_PRACTICE', '5'))
+LINK_DAYS = float(os.environ.get('PULSE_LINK_DAYS', '14'))   # accounts seen on the same network within this many days are "linked"
+FISH_PER_DAY = 80
+EXPEDITIONS_PER_DAY = 12
+RESERVED_NAMES = ('pulse', 'admin', 'system', 'garrick', 'moderator', 'mod', 'staff', 'support', 'server')
+IP_SALT = os.environ.get('PULSE_IP_SALT', 'pulse-ip-v1')
+MAX_CHALLENGES_PER_USER = 6
+MAX_SESSIONS_PER_USER = 10
+
+# ---------------------------------------------------------------------------
+# CLIENT IP: the right-most X-Forwarded-For entry is the one our proxy added;
+# anything to its left was written by the client and can be faked.
+# ---------------------------------------------------------------------------
+def _real_ip(self):
+    xff = [p.strip() for p in (self.headers.get('X-Forwarded-For', '') or '').split(',') if p.strip()]
+    if xff and PROXY_HOPS > 0:
+        return xff[-min(PROXY_HOPS, len(xff))]
+    return self.client_address[0]
+Handler.ip = _real_ip
+Handler.timeout = 10               # a connection that stalls mid-request is dropped (slowloris)
+
+def ip_tag(ip):
+    return hashlib.sha256((IP_SALT + ':' + str(ip)).encode()).hexdigest()[:16]
+
+def cur_ip():
+    return getattr(REQ, 'ip', '') or ''
+
+# ---------------------------------------------------------------------------
+# RATE LIMITS (token bucket per IP) + memory housekeeping
+# ---------------------------------------------------------------------------
+def rate_ok(ip, cost=1.0):
+    b = SEC['buckets'].get(ip)
+    t = time.time()
+    if b is None:
+        b = [RATE_BURST, t]
+        SEC['buckets'][ip] = b
+    b[0] = min(RATE_BURST, b[0] + (t - b[1]) * RATE_PER_SEC)
+    b[1] = t
+    if b[0] < cost:
+        return False
+    b[0] -= cost
+    return True
+
+def sec_purge():
+    t = time.time()
+    if t - SEC['last_purge'] < 60:
+        return
+    SEC['last_purge'] = t
+    SEC['buckets'] = {k: v for k, v in SEC['buckets'].items() if t - v[1] < 120}
+    for k in list(AUTH_HITS):
+        AUTH_HITS[k] = [h for h in AUTH_HITS[k] if t - h < 60]
+        if not AUTH_HITS[k]:
+            del AUTH_HITS[k]
+    day = day_key()
+    SEC['reg'] = {k: v for k, v in SEC['reg'].items() if k[0] == day}
+    SEC['login_fail'] = {k: v for k, v in SEC['login_fail'].items() if t - v[-1] < 900}
+    ep = epoch_of(now())
+    SEC['earn_ips'] = {k: v for k, v in SEC['earn_ips'].items() if k[0] >= ep - 1}
+    SEC['cache'] = {k: v for k, v in SEC['cache'].items() if t - v[0] < 60}
+    SEC['link_fail'] = {k: v for k, v in SEC['link_fail'].items() if t - v[1] < 900}
+    for k in [k for k, v in CHALLENGES.items() if now() - v['issued'] > 900]:
+        del CHALLENGES[k]
+    for k in [k for k, v in NODE_CHALLENGES.items() if v[1] < now()]:
+        NODE_CHALLENGES.pop(k, None)
+
+def cached(key, seconds, fn):
+    c = SEC['cache'].get(key)
+    if c and time.time() - c[0] < seconds:
+        return c[1]
+    v = fn()
+    SEC['cache'][key] = (time.time(), v)
+    return v
+
+# ---------------------------------------------------------------------------
+# CONNECTION CAP: past MAX_CONNECTIONS open sockets, new ones are closed at once
+# ---------------------------------------------------------------------------
+class PulseServer(ThreadingHTTPServer):
+    """A new connection only gets a worker thread once it has actually sent data.
+    Silent or half-open sockets wait in one shared watcher and are closed after
+    PENDING_TTL seconds, so a pile of idle connections cannot use up the workers."""
+    daemon_threads = True
+    request_queue_size = 128
+    PENDING_TTL = 8.0
+    MAX_PENDING = 4000
+
+    def __init__(self, *a, **k):
+        import selectors
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._sel = selectors.DefaultSelector()
+        self._pending = {}
+        self._plock = threading.Lock()
+        super().__init__(*a, **k)
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def process_request(self, request, client_address):
+        with self._plock:
+            if len(self._pending) >= self.MAX_PENDING:
+                self._drop(request)
+                return
+            try:
+                import selectors
+                self._sel.register(request, selectors.EVENT_READ, client_address)
+                self._pending[request] = time.time()
+            except Exception:
+                self._drop(request)
+
+    def _drop(self, request):
+        try:
+            request.close()
+        except Exception:
+            pass
+
+    def _watch(self):
+        while True:
+            try:
+                events = self._sel.select(timeout=0.5)
+            except Exception:
+                time.sleep(0.1)
+                continue
+            for key, _ in events:
+                with self._plock:
+                    try:
+                        self._sel.unregister(key.fileobj)
+                    except Exception:
+                        pass
+                    self._pending.pop(key.fileobj, None)
+                self._start(key.fileobj, key.data)
+            cut = time.time() - self.PENDING_TTL
+            with self._plock:
+                for sock in [s for s, t in self._pending.items() if t < cut]:
+                    try:
+                        self._sel.unregister(sock)
+                    except Exception:
+                        pass
+                    del self._pending[sock]
+                    self._drop(sock)
+
+    def _start(self, request, client_address):
+        if not self._slots.acquire(timeout=2.0):
+            self._drop(request)
+            return
+        t = threading.Thread(target=self._run, args=(request, client_address), daemon=True)
+        t.start()
+
+    def _run(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self._slots.release()
+
+# ---------------------------------------------------------------------------
+# ACCOUNTS: IP history (hashed), linked accounts, new-account cool-down
+# ---------------------------------------------------------------------------
+def note_ip(u, ip=None):
+    ip = ip or cur_ip()
+    if not ip or not u:
+        return
+    h = u.setdefault('ip_hist', {})
+    h[ip_tag(ip)] = int(now())
+    if len(h) > 12:
+        for k in sorted(h, key=h.get)[:-12]:
+            del h[k]
+
+def linked(a, b):
+    if not a or not b or a['uid'] == b['uid'] or LINK_DAYS <= 0:
+        return False
+    cut = now() - LINK_DAYS * 86400
+    ha = {k for k, t in a.get('ip_hist', {}).items() if t > cut}
+    return any(k in ha and t > cut for k, t in b.get('ip_hist', {}).items())
+
+def block_linked(a, b, what):
+    if linked(a, b):
+        raise ApiError('linked_accounts', 'Accounts that play from the same network cannot %s each other.' % what, 403)
+
+def account_age_h(u):
+    return (now() - u.get('created', now())) / 3600.0
+
+def require_seasoned(u, what):
+    if account_age_h(u) < NEW_ACCOUNT_HOURS:
+        left = max(1, int(round(NEW_ACCOUNT_HOURS - account_age_h(u))))
+        raise ApiError('new_account', 'New accounts can %s after %d hours. About %d hours to go - keep mining!' % (what, int(NEW_ACCOUNT_HOURS), left), 403)
+
+def require_practiced(u):
+    if u.get('practice_n', 0) < MIN_PRACTICE_TO_STAKE:
+        raise ApiError('practice_first', 'Play %d practice games before staking PLS (you have played %d).' % (MIN_PRACTICE_TO_STAKE, u.get('practice_n', 0)), 403)
+
+_v5_session_user = session_user
+def session_user(token):
+    u = _v5_session_user(token)
+    if u:
+        note_ip(u)
+    return u
+
+_v5_create_session = create_session
+def create_session(uid):
+    token = _v5_create_session(uid)
+    mine = sorted([(v['exp'], k) for k, v in DB['sessions'].items() if v['uid'] == uid])
+    for _, k in mine[:-MAX_SESSIONS_PER_USER]:
+        del DB['sessions'][k]
+    return token
+
+# ---------------------------------------------------------------------------
+# REGISTRATION + LOGIN
+# ---------------------------------------------------------------------------
+_v5_h_register = h_register
+def h_register(b, ip):
+    name = str(b.get('username', '')).strip().lower()
+    if name in RESERVED_NAMES or name.startswith('pulse_') or name.startswith('admin'):
+        raise ApiError('name_reserved', 'That name is reserved. Pick another.')
+    key = (day_key(), ip_tag(ip))
+    n = SEC['reg'].get(key, 0)
+    if n >= REG_PER_IP_DAY:
+        raise ApiError('too_many_accounts', 'Too many new accounts from this network today. Try again tomorrow.', 429)
+    out = _v5_h_register(b, ip)
+    SEC['reg'][key] = n + 1
+    u = DB['users'][DB['names'][name]]
+    u['practice_n'] = 0
+    note_ip(u, ip)
+    if n + 1 > STARTER_PER_IP_DAY:
+        # the one-time starter coins go to the first accounts from a network each day only
+        got = sum(e['amt'] for e in DB['ledger'][-20:] if e['to'] == U(u['uid']) and e['from'] == 'mint')
+        if got:
+            move(U(u['uid']), 'mint', got, 'starter grant withheld (multi-account limit)')
+            out['profile'] = profile_view(u)
+    save()
+    return out
+
+LOGIN_LOCK_FAILS = 8
+
+_v5_h_login = h_login
+def h_login(b, ip):
+    name = str(b.get('username', '')).strip().lower()
+    fails = [t for t in SEC['login_fail'].get(name, []) if now() - t < 900]
+    if len(fails) >= LOGIN_LOCK_FAILS:
+        raise ApiError('locked', 'Too many wrong passwords for this account. Try again in 15 minutes.', 429)
+    try:
+        out = _v5_h_login(b, ip)
+    except ApiError as e:
+        if e.code == 'bad_login':
+            SEC['login_fail'][name] = fails + [now()]
+        raise
+    SEC['login_fail'].pop(name, None)
+    note_ip(DB['users'][DB['names'][name]], ip)
+    return out
+
+# ---------------------------------------------------------------------------
+# HUMANITY CHECKS (auto-clickers and aim-bots)
+#   Auto-clicker: taps at a machine-steady rhythm (interval spread tiny).
+#   Aim-bot:      computes the perfect moment, so its timing error is near zero.
+# A human's taps wander by tens of milliseconds and their rhythm varies widely.
+# Flagged accounts: strikes capped at "good", no node pay, staking paused.
+# ---------------------------------------------------------------------------
+HM_N = 40
+
+def ideal_error_ms(ch, tap):
+    """Milliseconds between the tap and the nearest moment the marker crossed the zone centre."""
+    sp, off, c = float(ch['speed']), float(ch['offset']), float(ch['zone_center'])
+    best = 1e9
+    t = tap / 1000.0
+    for target in (c, 2.0 - c):
+        k = math.floor((t * sp + off - target) / 2.0)
+        for kk in (k - 1, k, k + 1, k + 2):
+            tt = (target - off + 2.0 * kk) / sp
+            best = min(best, abs(tt - t) * 1000.0)
+    return best
+
+def hm_record(u, err_ms=None, quality=None):
+    hm = u.setdefault('hm', {'iv': [], 'err': [], 'hits': [], 'last': 0.0, 'n': 0})
+    t = now()
+    if hm['last'] and t - hm['last'] < 30:
+        hm['iv'] = (hm['iv'] + [round((t - hm['last']) * 1000)])[-HM_N:]
+    hm['last'] = t
+    if err_ms is not None:
+        hm['err'] = (hm['err'] + [round(err_ms, 1)])[-HM_N:]
+    if quality is not None:
+        hm['hits'] = (hm['hits'] + [0 if quality == 'miss' else 1])[-30:]
+    hm['n'] += 1
+    return hm_verdict(u)
+
+def hm_verdict(u):
+    hm = u.get('hm') or {}
+    iv, err = hm.get('iv', []), hm.get('err', [])
+    if len(iv) >= HM_N:
+        mean = sum(iv) / len(iv)
+        sd = (sum((x - mean) ** 2 for x in iv) / len(iv)) ** 0.5
+        if mean > 0 and sd / mean < 0.06:
+            return 'auto-clicker: %d taps at a machine-steady rhythm (%.0f ms, spread %.0f ms)' % (len(iv), mean, sd)
+    if len(err) >= HM_N:
+        s = sorted(err)
+        med, p90 = s[len(s) // 2], s[int(len(s) * 0.9)]
+        if med < 4.0 and p90 < 10.0:
+            return 'aim-bot: %d strikes landed within %.1f ms of perfect' % (len(err), p90)
+    return None
+
+def flag_bot(u, why):
+    if not u.get('flag_why'):
+        u['flagged'] = True
+        u['flag_why'] = why
+        u['ac']['flag'] = True
+        u['ac']['why'] = why
+
+_v5_h_mine_strike = h_mine_strike
+def h_mine_strike(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    ch = dict(c['challenge']) if c and c['uid'] == u['uid'] and c['mode'] == 'mine' else None
+    tap = to_int(b.get('tap_ms'), -1)
+    out = _v5_h_mine_strike(u, b)
+    err = ideal_error_ms(ch, tap) if ch and tap > 0 else None
+    why = hm_record(u, err, out['quality'])
+    if why:
+        flag_bot(u, why)
+    if out['quality'] != 'miss':
+        u['last_good_strike'] = now()
+    # long sessions: ore and gems taper off after many veins in one day (stops 24/7 farming)
+    taper = 1.0 if u['day_blocks'] < 60 else (0.5 if u['day_blocks'] < 120 else 0.25)
+    if taper < 1.0:
+        total = out['ore_gained'] + out.get('bonus_ore', 0)
+        keep = int(total * taper)
+        u['ore'][out['ore']] = max(0, u['ore'][out['ore']] - (total - keep))
+        out['ore_inv'] = u['ore']
+        out['taper'] = taper
+        if out.get('gem') and random.random() > taper:
+            u['gems'][out['gem']] -= 1
+            out['gem'] = None
+    out['flagged'] = u.get('flagged', False)
+    save()
+    return out
+
+# Node pay needs real mining: a good-or-better strike recently, a hit rate a random
+# clicker cannot reach, no bot flag, and a limit on accounts earning from one network.
+NODE_HIT_RATE = float(os.environ.get('PULSE_NODE_HIT_RATE', '0.45'))
+
+_v5_node_eligibility = node_eligibility
+def node_eligibility(u, node, mining_flag):
+    ok, why = _v5_node_eligibility(u, node, mining_flag)
+    if not ok or NODE_POLICY != 'while_mining':
+        return ok, why
+    if now() - u.get('last_good_strike', 0) > MINING_WINDOW:
+        return False, 'no good strikes lately'
+    hits = (u.get('hm') or {}).get('hits', [])
+    if len(hits) >= 12 and sum(hits) / len(hits) < NODE_HIT_RATE:
+        return False, 'too many misses - aim for the zone'
+    ip = cur_ip()
+    if ip:
+        key = (epoch_of(now()), ip_tag(ip))
+        s = SEC['earn_ips'].setdefault(key, set())
+        if u['uid'] not in s and len(s) >= EARNERS_PER_IP:
+            return False, 'too many accounts earning from this network'
+        s.add(u['uid'])
+    return True, 'counted'
+
+# ---------------------------------------------------------------------------
+# FISHING + EXPEDITIONS: inhuman reactions spook the fish; daily limits
+# ---------------------------------------------------------------------------
+def day_count(u, key):
+    d = u.setdefault('daily', {})
+    if d.get('day') != day_key():
+        d.clear()
+        d['day'] = day_key()
+    return d.get(key, 0)
+
+def day_add(u, key):
+    day_count(u, key)
+    u['daily'][key] = u['daily'].get(key, 0) + 1
+
+_v5_h_fish_cast = h_fish_cast
+def h_fish_cast(u, b):
+    if day_count(u, 'fish') >= FISH_PER_DAY:
+        raise ApiError('fish_tired', 'The fish have stopped biting for today. Come back tomorrow!')
+    if u.get('flagged'):
+        raise ApiError('review_hold', 'Your account is under review.')
+    return _v5_h_fish_cast(u, b)
+
+_v5_h_fish_reel = h_fish_reel
+def h_fish_reel(u, b):
+    f = u.get('fishing')
+    tap = to_int(b.get('tap_ms'), -1)
+    if f and 0 <= tap - f['bite'] < 140:
+        u['fishing'] = None
+        save()
+        return {'ok': True, 'caught': False, 'why': 'Too early! The fish got spooked.'}
+    out = _v5_h_fish_reel(u, b)
+    if out.get('caught'):
+        day_add(u, 'fish')
+        fr = u.setdefault('fish_rt', [])
+        fr.append(out['reaction_ms'])
+        u['fish_rt'] = fr[-30:]
+        if len(u['fish_rt']) >= 30:
+            m = sum(u['fish_rt']) / 30.0
+            sd = (sum((x - m) ** 2 for x in u['fish_rt']) / 30.0) ** 0.5
+            if sd < 12:
+                flag_bot(u, 'fishing bot: 30 catches reeled with a %.0f ms spread' % sd)
+        save()
+    return out
+
+_v5_h_exp_start = h_exp_start
+def h_exp_start(u, b):
+    if day_count(u, 'exped') >= EXPEDITIONS_PER_DAY:
+        raise ApiError('too_tired', 'You are too tired for another expedition today.')
+    out = _v5_h_exp_start(u, b)
+    day_add(u, 'exped')
+    save()
+    return out
+
+_v5_h_exp_strike = h_exp_strike
+def h_exp_strike(u, b):
+    e = u.get('expedition')
+    ch = exp_floor(e['seed'], e['floor']) if e else None
+    tap = to_int(b.get('tap_ms'), -1)
+    out = _v5_h_exp_strike(u, b)
+    why = hm_record(u, ideal_error_ms(ch, tap) if ch and tap > 0 else None, out.get('quality'))
+    if why:
+        flag_bot(u, why)
+    if u.get('flagged') and out.get('quality') in ('perfect', 'great'):
+        out['quality'] = 'good'
+    return out
+
+# ---------------------------------------------------------------------------
+# SKILL GAMES
+#   Rune Sequence: the server reveals one round at a time (the whole answer used
+#   to be sent up front, so a cheat could just claim "remembered 20").
+#   Results are trimmed to the expected shape before being stored.
+#   Stricter "humanly possible" limits for reaction games.
+# ---------------------------------------------------------------------------
+QD_MIN_RT = 120
+SNIPER_MIN_RT = 150
+
+def sanitize_result(game, r):
+    if not isinstance(r, dict):
+        return {}
+    if game == 'quickdraw':
+        return {'reactions': [to_int(x, -1) for x in (r.get('reactions') or [])[:5]]}
+    if game == 'sequence':
+        return {'reached': to_int(r.get('reached'), 0)}
+    if game == 'sniper':
+        return {'hits': [{'hit': h.get('hit') is True, 'rt': to_int(h.get('rt'), 0)} for h in (r.get('hits') or [])[:12] if isinstance(h, dict)]}
+    if game == 'strikeoff':
+        return {'taps': [to_int(x, -1) for x in (r.get('taps') or [])[:SO_STRIKES]]}
+    return {}
+
+_v5_score_result = score_result
+def score_result(ch, result, elapsed_ms):
+    game = ch['game']
+    result = sanitize_result(game, result)
+    if game == 'quickdraw':
+        for x in result['reactions']:
+            if 0 <= x < QD_MIN_RT:
+                raise ApiError('impossible_reaction', 'That reaction time is not humanly possible.')
+    if game == 'sniper':
+        for h in result['hits']:
+            if h['hit'] and h['rt'] < SNIPER_MIN_RT:
+                raise ApiError('impossible_reaction', 'That reaction time is not humanly possible.')
+    if game == 'sequence':
+        if 'seq_n' not in ch:
+            raise ApiError('update_required', 'Please update Pulse to play Rune Sequence.')
+        result = {'reached': int(ch.get('seq_reached', 0))}
+        elapsed_ms = max(elapsed_ms, 10 ** 9)
+    return _v5_score_result(ch, result, elapsed_ms)
+
+def client_challenge(ch):
+    """What the phone is allowed to see of a challenge."""
+    if isinstance(ch, dict) and ch.get('game') == 'sequence' and 'runes' in ch:
+        n = int(ch.get('seq_n', ch.get('start_len', 3)))
+        out = {k: v for k, v in ch.items() if not k.startswith('seq_')}
+        out['runes'] = ch['runes'][:n]
+        out['interactive'] = True
+        return out
+    return ch
+
+def _seq_prepare(cid):
+    c = CHALLENGES.get(cid)
+    if c and c['challenge'].get('game') == 'sequence':
+        ch = c['challenge'] = dict(c['challenge'])
+        ch.setdefault('seq_n', ch['start_len'])
+        ch.setdefault('seq_reached', 0)
+        ch.setdefault('seq_t', now())
+
+def h_skill_step(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    if not c or c['uid'] != u['uid'] or c['challenge'].get('game') != 'sequence':
+        raise ApiError('no_challenge', 'That game session expired. Start again.')
+    ch = c['challenge']
+    if ch.get('seq_over'):
+        raise ApiError('game_over', 'This run is over.')
+    n = int(ch['seq_n'])
+    entered = b.get('entered')
+    if not isinstance(entered, list) or len(entered) != n:
+        raise ApiError('bad_result')
+    shown_ms = n * (ch['show_ms'] + ch['gap_ms'])
+    if (now() - ch['seq_t']) * 1000 + 300 < shown_ms * 0.9 + n * 120:
+        raise ApiError('too_fast', 'Answer arrived faster than the runes can be shown and tapped.')
+    if [to_int(x, -1) for x in entered] != ch['runes'][:n]:
+        ch['seq_over'] = True
+        return {'ok': True, 'correct': False, 'reached': ch['seq_reached']}
+    ch['seq_reached'] = n
+    if n >= len(ch['runes']):
+        ch['seq_over'] = True
+        return {'ok': True, 'correct': True, 'done': True, 'reached': n}
+    ch['seq_n'] = n + 1
+    ch['seq_t'] = now()
+    return {'ok': True, 'correct': True, 'done': False, 'reached': n, 'runes': ch['runes'][:n + 1]}
+
+def cap_user_challenges(uid, keep=None):
+    mine = sorted([(v['issued'], k) for k, v in CHALLENGES.items() if v['uid'] == uid and k != keep])
+    room = MAX_CHALLENGES_PER_USER - (1 if keep else 0)
+    for _, k in mine[:max(0, len(mine) - room)]:
+        del CHALLENGES[k]
+
+_v5_new_challenge = new_challenge
+def new_challenge(u, game, mode, extra=None):
+    cid, ch = _v5_new_challenge(u, game, mode, extra)
+    _seq_prepare(cid)
+    cap_user_challenges(u['uid'], cid)
+    return cid, client_challenge(CHALLENGES[cid]['challenge'])
+
+def _wrap_start(fn):
+    def w(u, b):
+        out = fn(u, b)
+        cid = out.get('id')
+        if cid in CHALLENGES:
+            _seq_prepare(cid)
+            out['challenge'] = client_challenge(CHALLENGES[cid]['challenge'])
+        cap_user_challenges(u['uid'], cid)
+        return out
+    return w
+
+h_pvp_play = _wrap_start(h_pvp_play)
+h_ghost_start = _wrap_start(h_ghost_start)
+h_koth_challenge = _wrap_start(h_koth_challenge)
+h_t_start = _wrap_start(h_t_start)
+
+def _wrap_submit(fn, practice=False):
+    def w(u, b):
+        if isinstance(b.get('result'), dict):
+            c = CHALLENGES.get(b.get('id') or '')
+            if c:
+                b = dict(b, result=sanitize_result(c['game'], b['result']))
+        out = fn(u, b)
+        if practice:
+            u['practice_n'] = u.get('practice_n', 0) + 1
+        ac_strict(u)
+        return out
+    return w
+
+h_practice_submit = _wrap_submit(h_practice_submit, practice=True)
+h_pvp_submit = _wrap_submit(h_pvp_submit)
+h_ghost_submit = _wrap_submit(h_ghost_submit)
+h_koth_submit = _wrap_submit(h_koth_submit)
+h_t_submit = _wrap_submit(h_t_submit)
+
+# A stricter reaction profile than v5.0: suspiciously fast or steady -> staking paused.
+def ac_strict(u):
+    s = u['ac']['rt']
+    if len(s) >= 20 and not u['ac']['flag']:
+        mean = sum(s) / len(s)
+        sd = (sum((x - mean) ** 2 for x in s) / len(s)) ** 0.5
+        if mean < 185:
+            u['ac']['flag'], u['ac']['why'] = True, 'average reaction %.0f ms over %d taps is faster than human' % (mean, len(s))
+        elif sd < 18:
+            u['ac']['flag'], u['ac']['why'] = True, 'reaction times too steady (spread %.1f ms over %d taps)' % (sd, len(s))
+
+# ---------------------------------------------------------------------------
+# STAKES, TRADES and TRANSFERS between accounts
+#   - new accounts wait NEW_ACCOUNT_HOURS before staking or trading
+#   - accounts sharing a network cannot pass PLS to each other through duels,
+#     the market, rentals, bounties or thrones
+# ---------------------------------------------------------------------------
+_v5_check_stake = check_stake
+def check_stake(u, game, stake):
+    s = _v5_check_stake(u, game, stake)
+    if s > 0:
+        require_seasoned(u, 'stake PLS')
+        require_practiced(u)
+    return s
+
+_v5_h_pvp_queue = h_pvp_queue
+def h_pvp_queue(u, b):
+    stake = to_int(b.get('stake'), 0)
+    if stake > 0:
+        # never match with a linked account: temporarily hide their queue entries
+        hidden = [q for q in DB['queue'] if linked(u, DB['users'].get(q['uid']))]
+        for q in hidden:
+            DB['queue'].remove(q)
+        try:
+            return _v5_h_pvp_queue(u, b)
+        finally:
+            DB['queue'].extend(hidden)
+    return _v5_h_pvp_queue(u, b)
+
+_v5_h_pvp_challenge = h_pvp_challenge
+def h_pvp_challenge(u, b):
+    to = DB['users'].get(DB['names'].get(str(b.get('username', '')).strip().lower(), ''))
+    if to_int(b.get('stake'), 0) > 0:
+        block_linked(u, to, 'stake PLS against')
+    if sum(1 for i in DB['invites'] if i['from'] == u['uid']) >= 5:
+        raise ApiError('too_many_invites', 'You have 5 challenges waiting already.')
+    return _v5_h_pvp_challenge(u, b)
+
+_v5_h_pvp_respond = h_pvp_respond
+def h_pvp_respond(u, b):
+    inv = next((i for i in DB['invites'] if i['id'] == b.get('invite_id') and i['to'] == u['uid']), None)
+    if inv and b.get('accept') and inv['stake'] > 0:
+        require_seasoned(u, 'stake PLS')
+        require_practiced(u)
+        ac_block(u, inv['stake'])
+        block_linked(u, DB['users'].get(inv['from']), 'stake PLS against')
+    return _v5_h_pvp_respond(u, b)
+
+_v5_h_series_challenge = h_series_challenge
+def h_series_challenge(u, b):
+    to = DB['users'].get(DB['names'].get(str(b.get('username', '')).strip().lower(), ''))
+    if to_int(b.get('stake'), 0) > 0:
+        block_linked(u, to, 'stake PLS against')
+    if sum(1 for s in DB['series'].values() if s['state'] == 'invited' and s['players'][0] == u['uid']) >= 5:
+        raise ApiError('too_many_invites', 'You have 5 challenges waiting already.')
+    return _v5_h_series_challenge(u, b)
+
+_v5_h_series_respond = h_series_respond
+def h_series_respond(u, b):
+    s = DB['series'].get(b.get('id'))
+    if s and b.get('accept') and s['stake'] > 0:
+        require_seasoned(u, 'stake PLS')
+        require_practiced(u)
+        block_linked(u, DB['users'].get(s['players'][0]), 'stake PLS against')
+    return _v5_h_series_respond(u, b)
+
+_v5_h_market_sell = h_market_sell
+def h_market_sell(u, b):
+    require_seasoned(u, 'sell at the market')
+    return _v5_h_market_sell(u, b)
+
+_v5_h_market_buy = h_market_buy
+def h_market_buy(u, b):
+    x = next((x for x in DB['market'] if x['id'] == b.get('id') and x['state'] == 'open'), None)
+    if x:
+        block_linked(u, DB['users'].get(x['seller']), 'trade with')
+    return _v5_h_market_buy(u, b)
+
+_v5_h_rent_offer = h_rent_offer
+def h_rent_offer(u, b):
+    require_seasoned(u, 'rent out gear')
+    return _v5_h_rent_offer(u, b)
+
+_v5_h_rent_take = h_rent_take
+def h_rent_take(u, b):
+    r = next((r for r in DB['rentals'] if r['id'] == b.get('id') and r['state'] == 'offered'), None)
+    if r:
+        block_linked(u, DB['users'].get(r['owner']), 'rent gear from')
+    return _v5_h_rent_take(u, b)
+
+_v5_h_bounty_post = h_bounty_post
+def h_bounty_post(u, b):
+    require_seasoned(u, 'post bounties')
+    return _v5_h_bounty_post(u, b)
+
+_v5_claim_bounties = claim_bounties
+def claim_bounties(u, game, score):
+    hidden = [x for x in DB['bounties'] if x['state'] == 'open' and linked(u, DB['users'].get(x['by']))]
+    for x in hidden:
+        x['state'] = 'held'
+    try:
+        return _v5_claim_bounties(u, game, score) if account_age_h(u) >= NEW_ACCOUNT_HOURS else []
+    finally:
+        for x in hidden:
+            x['state'] = 'open'
+
+_v5_h_koth_challenge = h_koth_challenge
+def h_koth_challenge(u, b):
+    k = DB['koth'].get(b.get('game'))
+    if k:
+        require_seasoned(u, 'challenge a throne')
+        block_linked(u, DB['users'].get(k['uid']), 'challenge the throne of')
+    return _v5_h_koth_challenge(u, b)
+
+_v5_h_t_enter = h_t_enter
+def h_t_enter(u, b):
+    require_seasoned(u, 'enter cups')
+    require_practiced(u)
+    ac_block(u, T_ENTRY)
+    return _v5_h_t_enter(u, b)
+
+_v5_h_rematch = h_rematch
+def h_rematch(u, b):
+    require_seasoned(u, 'stake PLS')
+    return _v5_h_rematch(u, b)
+
+# Forging a new item into a slot that holds rented gear would have destroyed it.
+_v5_h_forge = h_forge
+def h_forge(u, b):
+    r = RECIPES.get(b.get('recipe'))
+    if r and (u['gear'].get(r['slot']) or {}).get('rental'):
+        raise ApiError('renting', 'You are renting gear in that slot. Wait for the rental to end first.')
+    return _v5_h_forge(u, b)
+
+# ---------------------------------------------------------------------------
+# HOUSEKEEPING that never drops anything still holding PLS or items
+# ---------------------------------------------------------------------------
+def tick_market():
+    for x in DB['market']:
+        if x['state'] == 'open' and now() - x['t'] > 3 * 86400:
+            _give_item(user_fix(DB['users'][x['seller']]), x['kind'], x['item'], x['qty'])
+            x['state'] = 'expired'
+    live = [x for x in DB['market'] if x['state'] == 'open']
+    done = [x for x in DB['market'] if x['state'] != 'open' and now() - x['t'] < 7 * 86400][-1000:]
+    DB['market'] = done + live
+
+def tick_rentals():
+    for r in DB['rentals']:
+        if r['state'] == 'rented' and r['until'] < now():
+            rent_return(r)
+    live = [r for r in DB['rentals'] if r['state'] in ('offered', 'rented')]
+    done = [r for r in DB['rentals'] if r['state'] not in ('offered', 'rented') and now() - r['t'] < 3 * 86400][-500:]
+    DB['rentals'] = done + live
+
+def tick_bounties():
+    for x in DB['bounties']:
+        if x['state'] == 'open' and x['until'] < now():
+            move('escrow', U(x['by']), x['amount'], 'bounty_refund', x['id'])
+            x['state'] = 'expired'
+    live = [x for x in DB['bounties'] if x['state'] == 'open']
+    done = [x for x in DB['bounties'] if x['state'] != 'open' and x['until'] > now() - 7 * 86400][-500:]
+    DB['bounties'] = done + live
+
+def tick_series():
+    """Same as v5.0, but pruning only ever removes finished series (never escrowed ones)."""
+    for s in list(DB['series'].values()):
+        if s['state'] == 'invited' and now() - s['created'] > 3600:
+            move('escrow', U(s['players'][0]), s['stake'], 'series_expired', s['id'])
+            s['state'] = 'expired'
+        if s['state'] != 'active':
+            continue
+        m = DB['matches'].get(s['matches'][-1])
+        if not m or m['state'] == 'active':
+            continue
+        w = (m.get('result') or {}).get('winner')
+        if w:
+            s['wins'][DB['names'][w.lower()]] += 1
+        a, b2 = s['players']
+        champ = next((p for p in s['players'] if s['wins'][p] >= 2), None)
+        if champ is None and len(s['matches']) >= 5:
+            champ = a if s['wins'][a] > s['wins'][b2] else b2 if s['wins'][b2] > s['wins'][a] else 'draw'
+        if champ == 'draw':
+            for p in s['players']:
+                move('escrow', U(p), s['stake'], 'series_draw', s['id'])
+            s['state'], s['winner'] = 'settled', None
+        elif champ:
+            pot = s['stake'] * 2
+            rake = int(pot * RAKE)
+            move('escrow', U(champ), pot - rake, 'series_win', s['id'])
+            move('escrow', 'burn', rake, 'series_rake', s['id'])
+            s['state'], s['winner'] = 'settled', DB['users'][champ]['username']
+        else:
+            nm = create_match(a, b2, s['game'], 0)
+            nm['series'] = s['id']
+            s['matches'].append(nm['id'])
+    if len(DB['series']) > 3000:
+        live = {k: v for k, v in DB['series'].items() if v['state'] in ('invited', 'active')}
+        old = sorted([v for v in DB['series'].values() if v['state'] not in ('invited', 'active')], key=lambda x: x['created'])[-1500:]
+        DB['series'] = dict(live, **{x['id']: x for x in old})
+
+_v4_pvp_housekeeping = pvp_housekeeping
+def pvp_housekeeping():
+    t = now()
+    for q in list(DB['queue']):
+        if t - q['ts'] > QUEUE_TTL:
+            DB['queue'].remove(q)
+            move('escrow', U(q['uid']), q['stake'], 'queue_timeout', '')
+    for inv in list(DB['invites']):
+        if t - inv['ts'] > QUEUE_TTL:
+            DB['invites'].remove(inv)
+            move('escrow', U(inv['from']), inv['stake'], 'invite_expired', inv['id'])
+    for m in DB['matches'].values():
+        if m['state'] == 'active' and (len(m['subs']) == 2 or t > m['deadline']):
+            settle_match(m)
+    if len(DB['matches']) > 5000:
+        live = [m for m in DB['matches'].values() if m['state'] == 'active']
+        old = sorted([m for m in DB['matches'].values() if m['state'] != 'active'], key=lambda m: m['created'])[-4000:]
+        DB['matches'] = {m['id']: m for m in old + live}
+
+# ---------------------------------------------------------------------------
+# SMALL CAPS on things a script could pile up
+# ---------------------------------------------------------------------------
+_v5_h_friend_request = h_friend_request
+def h_friend_request(u, b):
+    if sum(1 for r in DB['friend_requests'] if r['from'] == u['uid'] and r['status'] == 'pending') >= 30:
+        raise ApiError('too_many_requests', 'You have 30 friend requests waiting already.')
+    return _v5_h_friend_request(u, b)
+
+def _safe_node_id(pem):
+    try:
+        return node_id_for(pem)
+    except Exception:
+        return ''
+
+def h_node_register(u, b, _orig=h_node_register):
+    mine = [n for n in DB['nodes'].values() if n['uid'] == u['uid']]
+    nid = _safe_node_id(str(b.get('pub', '')))
+    if len(mine) >= 12 and nid not in {n['id'] for n in mine}:
+        raise ApiError('too_many_nodes', 'This account has registered too many phones. Remove old ones first.')
+    return _orig(u, b)
+
+SHARE_GAP = 20
+_v5_h_share_create = h_share_create
+def h_share_create(u, b):
+    if now() - u.get('last_share', 0) < SHARE_GAP:
+        raise ApiError('slow_down', 'Wait a few seconds before making another card.', 429)
+    u['last_share'] = now()
+    return _v5_h_share_create(u, b)
+
+# Wallet linking: long one-time codes, one live code per player, and guessing is throttled.
+def h_wallet_link_start(u, b, _orig=h_wallet_link_start):
+    for k in [k for k, v in DB['wallet_links'].items() if v['uid'] == u['uid']]:
+        del DB['wallet_links'][k]
+    out = _orig(u, b)
+    old = out['code']
+    new = secrets.token_hex(8).upper()
+    DB['wallet_links'][new] = DB['wallet_links'].pop(old)
+    for k in ('url', 'phantom', 'solflare'):
+        out[k] = out[k].replace(old, new)
+    out['code'] = new
+    return out
+
+def h_wallet_link_finish(b, ip, _orig=h_wallet_link_finish):
+    tag = ip_tag(ip)
+    f = SEC['link_fail'].get(tag, [0, now()])
+    if f[0] >= 10:
+        raise ApiError('slow_down', 'Too many attempts. Wait a few minutes.', 429)
+    code = str(b.get('code', '')).upper()
+    if code not in DB['wallet_links']:
+        SEC['link_fail'][tag] = [f[0] + 1, now()]
+    try:
+        return _orig(b, ip)
+    except ApiError as e:
+        if e.code == 'bad_signature':
+            link = DB['wallet_links'].get(code)
+            if link:
+                link['bad'] = link.get('bad', 0) + 1
+                if link['bad'] >= 5:
+                    del DB['wallet_links'][code]
+        raise
+
+# Public pages are cached so a flood of requests cannot pin the server.
+_v5_h_network = h_network
+def h_network(q):
+    return cached('network', 10, lambda: _v5_h_network(q))
+
+_v5_h_economy = h_economy
+def h_economy(q):
+    return cached('economy', 10, lambda: _v5_h_economy(q))
+
+_v5_h_leaderboard = h_leaderboard
+def h_leaderboard(u, q):
+    if u is None:
+        board = (q.get('board') or ['level'])[0]
+        return cached('lb:' + str(board)[:20], 15, lambda: _v5_h_leaderboard(None, q))
+    return _v5_h_leaderboard(u, q)
+
+def h_health(q):
+    return {'ok': True, 'service': 'pulse', 'version': VERSION, 'storage': STORE.name, 'players': len(DB['users']),
+            'mint_policy': MINT_POLICY, 'starter_pls': STARTER_PLS if MINT_POLICY != 'classic' else 25}
+
+# Admin: see and clear every kind of flag (bot, reaction profile).
+def h_admin_ac(q):
+    clear = (q.get('clear') or [''])[0]
+    if clear and clear in DB['users']:
+        x = DB['users'][clear]
+        x['ac'] = {'rt': [], 'flag': False, 'why': ''}
+        x['flagged'] = False
+        x.pop('flag_why', None)
+        x['hm'] = {'iv': [], 'err': [], 'hits': [], 'last': 0.0, 'n': 0}
+        x['recent_q'] = []
+        save()
+    flagged = [{'uid': x['uid'], 'username': x['username'], 'why': x.get('flag_why') or x.get('ac', {}).get('why', '')}
+               for x in DB['users'].values() if x.get('flagged') or x.get('ac', {}).get('flag')]
+    return {'ok': True, 'flagged': flagged}
+
+# ---------------------------------------------------------------------------
+# ROUTES + REQUEST GATE
+# ---------------------------------------------------------------------------
+GET_PUBLIC.update({'/health': h_health, '/network/stats': h_network, '/economy': h_economy})
+GET_OPTIONAL.update({'/leaderboard': h_leaderboard})
+GET_ADMIN.update({'/admin/anticheat': h_admin_ac})
+POST_PUBLIC.update({'/auth/register': h_register, '/auth/login': h_login, '/wallet/link/finish': h_wallet_link_finish})
+POST_AUTH.update({'/mine/strike': h_mine_strike, '/fish/cast': h_fish_cast, '/fish/reel': h_fish_reel, '/expedition/start': h_exp_start,
+                  '/expedition/strike': h_exp_strike, '/skill/step': h_skill_step, '/practice/submit': h_practice_submit,
+                  '/pvp/submit': h_pvp_submit, '/pvp/play': h_pvp_play, '/ghost/start': h_ghost_start, '/ghost/submit': h_ghost_submit,
+                  '/koth/challenge': h_koth_challenge, '/koth/submit': h_koth_submit, '/tournament/start': h_t_start,
+                  '/tournament/submit': h_t_submit, '/tournament/enter': h_t_enter, '/pvp/queue': h_pvp_queue,
+                  '/pvp/challenge': h_pvp_challenge, '/pvp/respond': h_pvp_respond, '/series/challenge': h_series_challenge,
+                  '/series/respond': h_series_respond, '/market/sell': h_market_sell, '/market/buy': h_market_buy,
+                  '/rent/offer': h_rent_offer, '/rent/take': h_rent_take, '/bounty/post': h_bounty_post, '/pvp/rematch': h_rematch,
+                  '/forge': h_forge, '/friend/request': h_friend_request, '/node/register': h_node_register,
+                  '/share/create': h_share_create, '/wallet/link/start': h_wallet_link_start})
+
+def _too_many(handler):
+    handler.send_json({'ok': False, 'error': 'slow_down', 'message': 'Too many requests. Slow down a little.'}, 429)
+
+def _gate(handler):
+    ip = handler.ip()
+    REQ.ip = ip
+    with DB_LOCK:
+        sec_purge()
+    if not rate_ok(ip):
+        _too_many(handler)
+        return False
+    n = to_int(handler.headers.get('Content-Length', '0'), 0)
+    if n is None or n < 0 or n > 200000:
+        handler.send_json({'ok': False, 'error': 'too_large', 'message': 'Request too large.'}, 413)
+        handler.close_connection = True
+        return False
+    return True
+
+_v5_do_GET2 = Handler.do_GET
+def _v51_do_GET(self):
+    if _gate(self):
+        _v5_do_GET2(self)
+Handler.do_GET = _v51_do_GET
+
+_v5_do_POST2 = Handler.do_POST
+def _v51_do_POST(self):
+    if not _gate(self):
+        return
+    _v5_do_POST2(self)
+Handler.do_POST = _v51_do_POST
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------
@@ -3830,6 +4782,6 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, shutdown)
     print('Pulse Network v%s listening on %d (storage: %s, node policy: %s, mint policy: %s, devnet PULSE: %s)' % (VERSION, port, STORE.name, NODE_POLICY, MINT_POLICY, 'on' if SOL_STATE['enabled'] else 'off'), flush=True)
     try:
-        ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
+        PulseServer(('0.0.0.0', port), Handler).serve_forever()
     except KeyboardInterrupt:
         shutdown()

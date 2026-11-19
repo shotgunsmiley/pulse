@@ -304,6 +304,7 @@ func _play(mode: String, game: String, match_id: String) -> void:
 	playing = true
 	shell.visible = false
 	var sg = SkillGame.new()
+	sg.cid = "" if r.get("offline", false) else str(r.get("id", ""))
 	add_child(sg)
 	var heading: String = {"practice": "PRACTICE", "pvp": "DUEL", "tournament": "CUP ATTEMPT", "koth": "THRONE CHALLENGE",
 		"ghost": "GHOST RACE"}[mode] + " - " + UI.game_name(game).to_upper()

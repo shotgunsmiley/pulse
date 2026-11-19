@@ -37,7 +37,9 @@ for i in range(PLAYERS):
 def heartbeat(b):
     """Same accounting as /node/heartbeat for a counted beat (signature already verified)."""
     u, n = b['u'], S.DB['nodes'][b['node']]
-    u['last_strike'] = S.now()
+    u['last_strike'] = u['last_good_strike'] = S.now()
+    if hasattr(S, 'REQ'):
+        S.REQ.ip = '10.%d.%d.1' % (int(b['node'][1:]) // 250, int(b['node'][1:]) % 250)
     ok, why = S.node_eligibility(u, n, True)
     if not ok:
         return False
