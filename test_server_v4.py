@@ -542,7 +542,7 @@ def http_part():
                 time.sleep(0.05)
         out = []
         st, h = req('GET', '/health')
-        assert st == 200 and h['version'] == 4.1
+        assert st == 200 and h['version'] == 4.2
         st, r = req('POST', '/auth/register', {'username': 'HttpHero', 'password': 'secret123'})
         assert st == 200
         tok = r['token']

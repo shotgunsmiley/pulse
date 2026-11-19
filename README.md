@@ -2,7 +2,7 @@
 
 A 3D mining and wagering game for Android. You mine **PLS** (Pulse) by playing, then stake it in skill duels, tournaments and luck games.
 
-**PLS can only come from playing.** It enters the game only through mining, quests, and your phone acting as a network node while you mine. In v4 it cannot be bought, sold, sent to another player or cashed out. The long-term goal is a licensed real-money version if state laws allow it, but nothing in v4 moves real money.
+**PLS can only come from playing.** New PLS is only created by your phone acting as a network node while you mine, plus a one-time starter grant for new players. In v4 it cannot be bought, sold, sent to another player or cashed out. The long-term goal is a licensed real-money version if state laws allow it, but nothing in v4 moves real money.
 
 ---
 
@@ -321,6 +321,7 @@ Full descriptions are in `PULSE_V4_DESIGN.md`.
 - **v3.3**: Kivy app with a Python server.
 - **v3.4**: Pixel art and crash fixes. Builds through Buildozer on Colab.
 - **v3.5**: 10 feature updates.
+- **v4.2**: New PLS is only created by phone-node time while mining (plus a one-time 10 PLS starter grant); veins and quests give ore and XP. Optional PULSE test token on Solana devnet: when `PULSE_SOL_SECRET` is set on the server, every node reward is also minted as devnet PULSE (Token-2022) to the player's own Solana wallet. Switch back to the old rules with `PULSE_MINT_POLICY=classic`.
 - **v4.1**: Phones act as network nodes while mining: their own signing key, a signed handshake, signed heartbeats every 30 s, hourly node rewards in the internal PULSE ledger (exactly once, capped per hour and per day), node status in Profile > Stats, and an admin audit (needs `PULSE_ADMIN_TOKEN` on Render). PULSE is planned as a Solana Token-2022 token later; see the design plan.
 - **v4.0.1**: 2007-era graphics (new adventurer, rolling hills, trees, roofs, lighting) and solid scenery the adventurer walks around.
 - **v4.0**: Full rebuild.

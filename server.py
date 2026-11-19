@@ -1,4 +1,4 @@
-# Pulse Network Server v4.1 - Python standard library only (psycopg2 optional for Postgres)
+# Pulse Network Server v4.2 - Python standard library only (psycopg2 optional for Postgres)
 # Game API for the Pulse v4 Godot client.
 # PLS is an in-game, non-redeemable game balance: it can only be mined in game.
 # v4.1: phones register as nodes (signed handshake + heartbeats); node contribution is rewarded
@@ -8,10 +8,18 @@ import os, json, hashlib, hmac, time, random, uuid, datetime, threading, secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = 4.1
+VERSION = 4.2
 DATA_FILE = os.environ.get('PULSE_DATA_FILE', 'pulse_v4_data.json')
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 SESSION_DAYS = 30
+# Where new PLS may come from.
+#   nodes_only (default): only the hourly phone-node rewards create PLS, plus a one-time starter grant
+#                         for each new account. Veins and quests give ore and XP, not PLS.
+#   classic:              the original v4 rules (veins, quests and a 25 PLS welcome bonus also create PLS).
+MINT_POLICY = os.environ.get('PULSE_MINT_POLICY', 'nodes_only').strip()
+if MINT_POLICY not in ('nodes_only', 'classic'):
+    MINT_POLICY = 'nodes_only'
+STARTER_PLS = int(os.environ.get('PULSE_STARTER_PLS', '10'))
 DB_LOCK = threading.RLock()
 
 def now():
@@ -376,7 +384,8 @@ def quests_for(u):
         cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
         for k in [k for k, v in DB['quests'].items() if v.get('date', '') < cutoff]:
             del DB['quests'][k]
-        DB['quests'][key] = {'date': day_key(), 'quests': [dict(q, progress=0, claimed=False) for q in QUEST_DEFS]}
+        DB['quests'][key] = {'date': day_key(), 'quests': [dict(q, progress=0, claimed=False, pls=q['pls'] if MINT_POLICY == 'classic' else 0)
+                                                           for q in QUEST_DEFS]}
     return DB['quests'][key]
 
 def bump(u, qid, n=1):
@@ -734,7 +743,10 @@ def h_register(b, ip):
     u = new_user(name, pw)
     DB['users'][u['uid']] = u
     DB['names'][name.lower()] = u['uid']
-    move('mint', U(u['uid']), 25, 'welcome_bonus')
+    if MINT_POLICY == 'classic':
+        move('mint', U(u['uid']), 25, 'welcome_bonus')
+    elif STARTER_PLS > 0:
+        move('mint', U(u['uid']), STARTER_PLS, 'starter grant (one time)')
     token = create_session(u['uid'])
     save()
     return {'ok': True, 'token': token, 'profile': profile_view(u)}
@@ -787,7 +799,7 @@ def h_veins(u, q):
     for t in TIERS:
         ok, why = tier_status(u, t)
         out.append({'id': t['id'], 'name': t['name'], 'ore': t['ore'], 'hp': t['hp'], 'hp_left': u['vein_hp'].get(str(t['id']), t['hp']),
-                    'pls': t['pls'], 'unlocked': ok, 'locked_reason': why, 'level': t['level']})
+                    'pls': t['pls'] if MINT_POLICY == 'classic' else 0, 'unlocked': ok, 'locked_reason': why, 'level': t['level']})
     roll_counters(u)
     return {'ok': True, 'veins': out, 'daily_mult': daily_mult(u), 'day_blocks': u['day_blocks']}
 
@@ -848,8 +860,9 @@ def h_mine_strike(u, b):
     cleared, pls = False, 0
     if hp <= 0:
         cleared = True
-        pls = max(1, int(t['pls'] * daily_mult(u)))
-        move('mint', U(u['uid']), pls, 'vein_cleared', t['name'])
+        if MINT_POLICY == 'classic':
+            pls = max(1, int(t['pls'] * daily_mult(u)))
+            move('mint', U(u['uid']), pls, 'vein_cleared', t['name'])
         u['day_blocks'] += 1
         u['week_blocks'] += 1
         u['lifetime_blocks'] += 1
@@ -937,6 +950,8 @@ def h_claim(u, b):
     if qq['progress'] < qq['target']:
         raise ApiError('not_complete', 'Not finished yet.')
     qq['claimed'] = True
+    if MINT_POLICY != 'classic':
+        qq['pls'] = 0
     move('mint', U(u['uid']), qq['pls'], 'quest', qq['id'])
     u['ore'][qq['ore']] += qq['ore_amt']
     save()
@@ -1496,7 +1511,8 @@ def h_leaderboard(u, q):
 # ---------------------------------------------------------------------------
 # ROUTING
 # ---------------------------------------------------------------------------
-GET_PUBLIC = {'/health': lambda q: {'ok': True, 'service': 'pulse', 'version': VERSION, 'storage': STORE.name, 'players': len(DB['users'])},
+GET_PUBLIC = {'/health': lambda q: {'ok': True, 'service': 'pulse', 'version': VERSION, 'storage': STORE.name, 'players': len(DB['users']),
+                                    'mint_policy': MINT_POLICY, 'starter_pls': STARTER_PLS if MINT_POLICY != 'classic' else 25},
               '/economy': h_economy, '/recipes': h_recipes, '/shop': h_shop}
 GET_OPTIONAL = {'/leaderboard': h_leaderboard, '/chat/history': h_history}
 GET_AUTH = {'/me': h_me, '/ledger': h_ledger, '/mine/veins': h_veins, '/quests': h_quests, '/pvp/status': h_pvp_status,
@@ -1901,7 +1917,7 @@ def h_node_status(u, q):
               'pending_units': sum(n['units_epoch'].values()), 'last_heartbeat': int(n['last_hb']),
               'online': now() - n['last_hb'] < HB_INTERVAL * 2.5} for n in mine]
     rewards = [r for r in DB['node_rewards'] if r['uid'] == u['uid']][-20:]
-    return {'ok': True, 'policy': NODE_POLICY, 'interval': HB_INTERVAL, 'units_per_pls': UNITS_PER_PLS, 'daily_cap': DAILY_UNIT_CAP,
+    return {'ok': True, 'policy': NODE_POLICY, 'mint_policy': MINT_POLICY, 'interval': HB_INTERVAL, 'units_per_pls': UNITS_PER_PLS, 'daily_cap': DAILY_UNIT_CAP,
             'units_today': sum(n['day_units'] for n in mine if n['day'] == d), 'nodes': nodes,
             'rewards': list(reversed(rewards)), 'total_earned': sum(r['pls'] for r in DB['node_rewards'] if r['uid'] == u['uid']),
             'next_settlement_in': int(EPOCH_SECONDS - now() % EPOCH_SECONDS)}
@@ -1997,6 +2013,380 @@ POST_AUTH.update({'/node/register': h_node_register, '/node/challenge': h_node_c
                   '/node/heartbeat': h_node_heartbeat, '/node/remove': h_node_remove})
 GET_AUTH.update({'/node/status': h_node_status})
 
+# ===========================================================================
+# PULSE ON SOLANA DEVNET (test token, no cash value)
+#
+# Turned on by setting PULSE_SOL_SECRET on the server (a devnet keypair). Then:
+#   - the server creates the PULSE devnet mint (Token-2022, 9 decimals) once, at an address
+#     derived from that secret, so a restart or a Render data wipe reuses the same mint;
+#   - every hourly node reward is ALSO minted on devnet to the player's linked devnet wallet
+#     (a public, checkable record of node issuance). Rewards earned before a wallet is linked
+#     wait and are sent once it is.
+#   - devnet PULSE is minted ONLY by node rewards: nothing else in the game mints it.
+# The in-game PLS balance stays separate (as the Solana plan requires); nothing converts
+# between them. Uses Solana's public JSON-RPC (api.devnet.solana.com by default).
+# ===========================================================================
+import urllib.request as _urlreq
+
+SOL_RPC = os.environ.get('PULSE_SOL_RPC', 'https://api.devnet.solana.com').strip()
+SOL_CLUSTER = os.environ.get('PULSE_SOL_CLUSTER', 'devnet').strip()
+SOL_DECIMALS = 9
+SYSTEM_PROGRAM = '11111111111111111111111111111111'
+TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
+MINT_SIZE = 82
+SOL_STATE = {'enabled': False, 'error': '', 'mint_ready': False, 'last_check': 0}
+
+def b58decode(s):
+    n = 0
+    for c in s:
+        if c not in B58_IDX:
+            raise ValueError('bad base58')
+        n = n * 58 + B58_IDX[c]
+    pad = len(s) - len(s.lstrip('1'))
+    body = n.to_bytes((n.bit_length() + 7) // 8, 'big') if n else b''
+    return b'\0' * pad + body
+
+
+# ---- Ed25519 (RFC 8032), extended coordinates ------------------------------
+ED_P = 2 ** 255 - 19
+ED_L = 2 ** 252 + 27742317777372353535851937790883648493
+ED_D = -121665 * pow(121666, ED_P - 2, ED_P) % ED_P
+ED_I = pow(2, (ED_P - 1) // 4, ED_P)
+
+def _ed_xrecover(y, sign):
+    x2 = (y * y - 1) * pow(ED_D * y * y + 1, ED_P - 2, ED_P) % ED_P
+    if x2 == 0:
+        if sign:
+            return None
+        return 0
+    x = pow(x2, (ED_P + 3) // 8, ED_P)
+    if (x * x - x2) % ED_P != 0:
+        x = x * ED_I % ED_P
+    if (x * x - x2) % ED_P != 0:
+        return None
+    if (x & 1) != sign:
+        x = ED_P - x
+    return x
+
+_ED_GY = 4 * pow(5, ED_P - 2, ED_P) % ED_P
+_ED_GX = _ed_xrecover(_ED_GY, 0)
+ED_G = (_ED_GX, _ED_GY, 1, _ED_GX * _ED_GY % ED_P)
+
+def _ed_add(P, Q):
+    A = (P[1] - P[0]) * (Q[1] - Q[0]) % ED_P
+    B = (P[1] + P[0]) * (Q[1] + Q[0]) % ED_P
+    C = 2 * P[3] * Q[3] * ED_D % ED_P
+    D = 2 * P[2] * Q[2] % ED_P
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F % ED_P, G * H % ED_P, F * G % ED_P, E * H % ED_P)
+
+def _ed_mul(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            Q = _ed_add(Q, P)
+        P = _ed_add(P, P)
+        s >>= 1
+    return Q
+
+def _ed_eq(P, Q):
+    return (P[0] * Q[2] - Q[0] * P[2]) % ED_P == 0 and (P[1] * Q[2] - Q[1] * P[2]) % ED_P == 0
+
+def _ed_enc(P):
+    zi = pow(P[2], ED_P - 2, ED_P)
+    x, y = P[0] * zi % ED_P, P[1] * zi % ED_P
+    return (y | ((x & 1) << 255)).to_bytes(32, 'little')
+
+def _ed_dec(b):
+    if len(b) != 32:
+        return None
+    y = int.from_bytes(b, 'little')
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    if y >= ED_P:
+        return None
+    x = _ed_xrecover(y, sign)
+    if x is None:
+        return None
+    return (x, y, 1, x * y % ED_P)
+
+def _ed_h(m):
+    return int.from_bytes(hashlib.sha512(m).digest(), 'little')
+
+def ed25519_keypair(seed=None):
+    seed = seed or secrets.token_bytes(32)
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], 'little')
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return seed, _ed_enc(_ed_mul(a, ED_G))
+
+def ed25519_sign(seed, msg):
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], 'little')
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    A = _ed_enc(_ed_mul(a, ED_G))
+    r = _ed_h(h[32:] + msg) % ED_L
+    R = _ed_enc(_ed_mul(r, ED_G))
+    k = _ed_h(R + A + msg) % ED_L
+    S = (r + k * a) % ED_L
+    return R + S.to_bytes(32, 'little')
+
+
+
+def sol_keypair_from_secret(text):
+    """Accepts a base58 64-byte secret key (Phantom export style) or a JSON byte array (solana-keygen style)."""
+    text = (text or '').strip()
+    if not text:
+        return None
+    raw = bytes(json.loads(text)) if text.startswith('[') else b58decode(text)
+    seed = raw[:32]
+    seed, pub = ed25519_keypair(seed)
+    if len(raw) == 64 and raw[32:] != pub:
+        raise ValueError('PULSE_SOL_SECRET: public half does not match')
+    return {'seed': seed, 'pub': pub, 'address': b58encode(pub)}
+
+def sol_is_address(s):
+    try:
+        return isinstance(s, str) and 32 <= len(s) <= 44 and len(b58decode(s)) == 32
+    except Exception:
+        return False
+
+def find_program_address(seeds, program_id):
+    pid = b58decode(program_id)
+    for bump in range(255, -1, -1):
+        h = hashlib.sha256(b''.join(seeds) + bytes([bump]) + pid + b'ProgramDerivedAddress').digest()
+        if _ed_dec(h) is None:
+            return b58encode(h), bump
+    raise ValueError('no program address')
+
+def ata_address(owner, mint):
+    return find_program_address([b58decode(owner), b58decode(TOKEN_2022), b58decode(mint)], ATA_PROGRAM)[0]
+
+def _shortvec(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7f
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+def build_tx(instructions, payer, signers, blockhash):
+    """Legacy Solana transaction. instructions = [(program, [(address, is_signer, is_writable)], data_bytes)].
+    signers = {address: seed}. Returns the serialized, signed transaction bytes."""
+    metas = {payer: [True, True]}
+    order = [payer]
+    for prog, accts, _ in instructions:
+        for a, s, w in accts:
+            if a not in metas:
+                metas[a] = [False, False]
+                order.append(a)
+            metas[a][0] |= s
+            metas[a][1] |= w
+        if prog not in metas:
+            metas[prog] = [False, False]
+            order.append(prog)
+    groups = ([a for a in order if metas[a][0] and metas[a][1]], [a for a in order if metas[a][0] and not metas[a][1]],
+              [a for a in order if not metas[a][0] and metas[a][1]], [a for a in order if not metas[a][0] and not metas[a][1]])
+    keys = groups[0] + groups[1] + groups[2] + groups[3]
+    idx = {a: i for i, a in enumerate(keys)}
+    msg = bytes([len(groups[0]) + len(groups[1]), len(groups[1]), len(groups[3])])
+    msg += _shortvec(len(keys)) + b''.join(b58decode(a) for a in keys) + b58decode(blockhash)
+    msg += _shortvec(len(instructions))
+    for prog, accts, data in instructions:
+        msg += bytes([idx[prog]]) + _shortvec(len(accts)) + bytes(idx[a] for a, _, _ in accts) + _shortvec(len(data)) + data
+    sigs = []
+    for a in keys[:len(groups[0]) + len(groups[1])]:
+        if a not in signers:
+            raise ValueError('missing signer %s' % a)
+        sigs.append(ed25519_sign(signers[a], msg))
+    return _shortvec(len(sigs)) + b''.join(sigs) + msg
+
+def ix_create_account(payer, new, lamports, space, owner):
+    data = (0).to_bytes(4, 'little') + lamports.to_bytes(8, 'little') + space.to_bytes(8, 'little') + b58decode(owner)
+    return (SYSTEM_PROGRAM, [(payer, True, True), (new, True, True)], data)
+
+def ix_initialize_mint2(mint, decimals, authority):
+    return (TOKEN_2022, [(mint, False, True)], bytes([20, decimals]) + b58decode(authority) + bytes([0]))
+
+def ix_create_ata_idempotent(payer, ata, owner, mint):
+    return (ATA_PROGRAM, [(payer, True, True), (ata, False, True), (owner, False, False), (mint, False, False),
+                          (SYSTEM_PROGRAM, False, False), (TOKEN_2022, False, False)], bytes([1]))
+
+def ix_mint_to_checked(mint, dest, authority, amount, decimals):
+    return (TOKEN_2022, [(mint, False, True), (dest, False, True), (authority, True, False)],
+            bytes([14]) + amount.to_bytes(8, 'little') + bytes([decimals]))
+
+def sol_rpc(method, params=None, timeout=20):
+    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params or []}).encode()
+    r = _urlreq.Request(SOL_RPC, data=body, headers={'Content-Type': 'application/json'})
+    with _urlreq.urlopen(r, timeout=timeout) as x:
+        out = json.loads(x.read())
+    if 'error' in out:
+        raise RuntimeError('%s: %s' % (method, out['error'].get('message', out['error'])))
+    return out['result']
+
+def sol_send(instructions, payer, signers):
+    bh = sol_rpc('getLatestBlockhash', [{'commitment': 'confirmed'}])['value']['blockhash']
+    raw = build_tx(instructions, payer, signers, bh)
+    return sol_rpc('sendTransaction', [_b64.b64encode(raw).decode(), {'encoding': 'base64', 'preflightCommitment': 'confirmed'}])
+
+def sol_confirmed(sig):
+    st = sol_rpc('getSignatureStatuses', [[sig], {'searchTransactionHistory': True}])['value'][0]
+    if st is None:
+        return None
+    if st.get('err'):
+        return 'failed'
+    return 'confirmed' if st.get('confirmationStatus') in ('confirmed', 'finalized') else None
+
+SOL_KEY = None
+SOL_MINT_KEY = None
+try:
+    SOL_KEY = sol_keypair_from_secret(os.environ.get('PULSE_SOL_SECRET', ''))
+    if SOL_KEY:
+        s, p = ed25519_keypair(hashlib.sha256(SOL_KEY['seed'] + b'pulse-devnet-mint-v1').digest())
+        SOL_MINT_KEY = {'seed': s, 'pub': p, 'address': b58encode(p)}
+        SOL_STATE['enabled'] = True
+except Exception as e:
+    SOL_STATE['error'] = 'PULSE_SOL_SECRET is not a valid Solana secret key: %s' % e
+
+DB.setdefault('sol_outbox', {})
+
+def sol_explorer(kind, value):
+    return 'https://explorer.solana.com/%s/%s?cluster=%s' % (kind, value, SOL_CLUSTER)
+
+def sol_ensure_mint():
+    """Creates the PULSE devnet mint once (its address comes from the server's secret)."""
+    if SOL_STATE['mint_ready']:
+        return True
+    mint, auth = SOL_MINT_KEY['address'], SOL_KEY['address']
+    info = sol_rpc('getAccountInfo', [mint, {'encoding': 'base64'}])['value']
+    if info is None:
+        lam = sol_rpc('getMinimumBalanceForRentExemption', [MINT_SIZE])
+        bal = sol_rpc('getBalance', [auth])['value']
+        if bal < lam + 20000:
+            SOL_STATE['error'] = 'Server wallet %s needs devnet SOL (faucet.solana.com) to create the PULSE mint.' % auth
+            return False
+        sig = sol_send([ix_create_account(auth, mint, lam, MINT_SIZE, TOKEN_2022), ix_initialize_mint2(mint, SOL_DECIMALS, auth)],
+                       auth, {auth: SOL_KEY['seed'], mint: SOL_MINT_KEY['seed']})
+        for _ in range(40):
+            time.sleep(1.0)
+            st = sol_confirmed(sig)
+            if st == 'failed':
+                SOL_STATE['error'] = 'Creating the mint failed: ' + sig
+                return False
+            if st:
+                break
+        info = sol_rpc('getAccountInfo', [mint, {'encoding': 'base64'}])['value']
+        if info is None:
+            return False
+    if info.get('owner') != TOKEN_2022:
+        SOL_STATE['error'] = 'Mint address is owned by another program.'
+        return False
+    SOL_STATE['mint_ready'] = True
+    SOL_STATE['error'] = ''
+    return True
+
+def sol_queue_rewards():
+    """Adds every node reward that has not been minted on devnet yet (and whose player linked a wallet)."""
+    box = DB['sol_outbox']
+    for r in DB['node_rewards']:
+        if r['pls'] <= 0 or r['key'] in box:
+            continue
+        u = DB['users'].get(r['uid'])
+        if not u or not u.get('sol_wallet'):
+            continue
+        box[r['key']] = {'uid': r['uid'], 'wallet': u['sol_wallet'], 'pls': r['pls'], 'status': 'queued', 'sig': '', 'tries': 0, 't': now()}
+
+def sol_worker_step():
+    if not SOL_STATE['enabled']:
+        return
+    with DB_LOCK:
+        sol_queue_rewards()
+        box = DB['sol_outbox']
+        sent = [(k, v) for k, v in box.items() if v['status'] == 'sent']
+        queued = [(k, v) for k, v in box.items() if v['status'] == 'queued' and v['tries'] < 8][:5]
+    if not sent and not queued and SOL_STATE['mint_ready']:
+        return
+    if not sol_ensure_mint():
+        return
+    for k, v in sent:
+        st = sol_confirmed(v['sig'])
+        with DB_LOCK:
+            if st == 'confirmed':
+                v['status'] = 'confirmed'
+            elif st == 'failed' or (st is None and now() - v['t'] > 120):
+                v['status'] = 'queued'         # blockhash expired or failed: send again
+            save()
+    mint, auth = SOL_MINT_KEY['address'], SOL_KEY['address']
+    for k, v in queued:
+        ata = ata_address(v['wallet'], mint)
+        try:
+            sig = sol_send([ix_create_ata_idempotent(auth, ata, v['wallet'], mint),
+                            ix_mint_to_checked(mint, ata, auth, v['pls'] * 10 ** SOL_DECIMALS, SOL_DECIMALS)],
+                           auth, {auth: SOL_KEY['seed']})
+            with DB_LOCK:
+                v.update(status='sent', sig=sig, t=now())
+                v['tries'] += 1
+                save()
+        except Exception as e:
+            with DB_LOCK:
+                v['tries'] += 1
+                v['error'] = str(e)[:200]
+                save()
+
+SOL_EVERY = float(os.environ.get('PULSE_SOL_EVERY', '20'))
+
+def sol_loop():
+    while True:
+        time.sleep(SOL_EVERY)
+        try:
+            sol_worker_step()
+        except Exception as e:
+            SOL_STATE['error'] = str(e)[:200]
+
+def h_sol_status(q):
+    out = {'ok': True, 'enabled': SOL_STATE['enabled'], 'cluster': SOL_CLUSTER, 'error': SOL_STATE['error'],
+           'note': 'PULSE on Solana devnet is a test token with no cash value. Only node rewards mint it.'}
+    if SOL_STATE['enabled']:
+        box = DB['sol_outbox'].values()
+        out.update({'mint': SOL_MINT_KEY['address'], 'mint_ready': SOL_STATE['mint_ready'], 'server_wallet': SOL_KEY['address'],
+                    'mint_explorer': sol_explorer('address', SOL_MINT_KEY['address']), 'token_program': 'Token-2022',
+                    'decimals': SOL_DECIMALS, 'minted_pulse': sum(v['pls'] for v in box if v['status'] == 'confirmed'),
+                    'pending': sum(1 for v in box if v['status'] in ('queued', 'sent'))})
+    return out
+
+def h_sol_wallet(u, b):
+    addr = str(b.get('address', '')).strip()
+    if addr == '':
+        u.pop('sol_wallet', None)
+        save()
+        return {'ok': True, 'sol_wallet': None}
+    if not sol_is_address(addr):
+        raise ApiError('bad_address', 'That is not a Solana address. Copy it from your wallet app.')
+    u['sol_wallet'] = addr
+    save()
+    return {'ok': True, 'sol_wallet': addr}
+
+def h_sol_mine(u, q):
+    box = [dict(key=k, **{x: v[x] for x in ('pls', 'status', 'sig')}) for k, v in DB['sol_outbox'].items() if v['uid'] == u['uid']]
+    waiting = sum(r['pls'] for r in DB['node_rewards'] if r['uid'] == u['uid'] and r['pls'] > 0 and r['key'] not in DB['sol_outbox'])
+    return {'ok': True, 'enabled': SOL_STATE['enabled'], 'cluster': SOL_CLUSTER, 'sol_wallet': u.get('sol_wallet'),
+            'mint': SOL_MINT_KEY['address'] if SOL_STATE['enabled'] else None,
+            'confirmed_pulse': sum(r['pls'] for r in box if r['status'] == 'confirmed'),
+            'pending_pulse': sum(r['pls'] for r in box if r['status'] in ('queued', 'sent')) + waiting,
+            'recent': sorted(box, key=lambda r: r['key'])[-8:][::-1],
+            'wallet_explorer': sol_explorer('address', u['sol_wallet']) if u.get('sol_wallet') else None}
+
+GET_PUBLIC.update({'/solana/status': h_sol_status})
+GET_AUTH.update({'/solana/mine': h_sol_mine})
+POST_AUTH.update({'/solana/wallet': h_sol_wallet})
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------
@@ -2004,8 +2394,9 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', '10000'))
     threading.Thread(target=saver_loop, daemon=True).start()
     threading.Thread(target=node_loop, daemon=True).start()
+    threading.Thread(target=sol_loop, daemon=True).start()
     signal.signal(signal.SIGTERM, shutdown)
-    print('Pulse Network v%s listening on %d (storage: %s, node policy: %s)' % (VERSION, port, STORE.name, NODE_POLICY), flush=True)
+    print('Pulse Network v%s listening on %d (storage: %s, node policy: %s, mint policy: %s, devnet PULSE: %s)' % (VERSION, port, STORE.name, NODE_POLICY, MINT_POLICY, 'on' if SOL_STATE['enabled'] else 'off'), flush=True)
     try:
         ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
     except KeyboardInterrupt:
