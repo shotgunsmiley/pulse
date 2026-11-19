@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pulse Network</title>
+<meta name="description" content="Pulse is a 3D mining game for Android where your phone helps run the network while you play, and the network pays you back every 10 minutes.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 :root {
-  /* One visual world: a lamp-lit mine at night. Torchlight amber for warmth, Pulse crystal teal for the network. */
+  /* One world: a lamp-lit mine at night. Torch amber = action and money. Crystal teal = the network. */
   --rock: #0e0c0a;
   --rock-2: #1a1612;
   --rock-3: #262019;
@@ -22,152 +23,217 @@
   --display: "Pixelify Sans", "Courier New", monospace;
   --body: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
-  /* Layout: a narrow reading column with full-bleed bands; the hero canvas is the one loud moment. */
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
-body {
-  margin: 0;
-  background: var(--rock);
-  color: var(--ink);
-  font-family: var(--body);
-  font-size: 18px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
-}
+body { margin: 0; background: var(--rock); color: var(--ink); font-family: var(--body); font-size: 18px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
 a { color: var(--crystal); text-underline-offset: 3px; }
-a:focus-visible, button:focus-visible { outline: 2px solid var(--torch); outline-offset: 3px; border-radius: 4px; }
-h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.05; margin: 0; text-wrap: balance; letter-spacing: 0.01em; }
+a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--torch); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.05; margin: 0; text-wrap: balance; }
 p { margin: 0; }
 .wrap { width: min(1080px, 100% - 40px); margin-inline: auto; }
-.measure { max-width: 62ch; }
-.mono { font-family: var(--mono); }
+.measure { max-width: 60ch; }
+.kicker { font-family: var(--mono); font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--crystal); }
+.amber { color: var(--torch); }
+.teal { color: var(--crystal); }
 
 /* ---------- top bar ---------- */
 .bar { position: absolute; inset: 0 0 auto 0; z-index: 3; }
 .bar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 20px; }
 .brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-size: 22px; color: var(--ink); text-decoration: none; }
-.brand-gem { width: 18px; height: 22px; background: linear-gradient(160deg, #9ff3e6, var(--crystal) 45%, var(--crystal-deep)); clip-path: polygon(50% 0, 100% 35%, 80% 100%, 20% 100%, 0 35%); box-shadow: 0 0 18px var(--crystal); }
-.pill { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 10px; border: 1px solid rgba(232, 163, 58, 0.5); color: var(--torch); border-radius: 999px; white-space: nowrap; }
+.gem { width: 18px; height: 22px; background: linear-gradient(160deg, #9ff3e6, var(--crystal) 45%, var(--crystal-deep)); clip-path: polygon(50% 0, 100% 35%, 80% 100%, 20% 100%, 0 35%); box-shadow: 0 0 18px var(--crystal); }
 .bar nav { display: flex; gap: 22px; font-size: 15px; }
 .bar nav a { color: var(--ink-dim); text-decoration: none; }
 .bar nav a:hover { color: var(--ink); }
-@media (max-width: 720px) { .bar nav { display: none; } }
+.pill { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; padding: 6px 10px; border: 1px solid rgba(232,163,58,.5); color: var(--torch); border-radius: 999px; white-space: nowrap; }
+@media (max-width: 760px) { .bar nav { display: none; } }
 
 /* ---------- hero ---------- */
-.hero { position: relative; overflow: hidden; padding: 140px 0 90px; min-height: 640px; isolation: isolate; }
+.hero { position: relative; overflow: hidden; padding: 140px 0 100px; min-height: 700px; isolation: isolate; }
 #cave { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
-.hero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 160px; background: linear-gradient(transparent, var(--rock)); z-index: -1; }
-.kicker { font-family: var(--mono); font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--crystal); }
-.hero h1 { font-size: clamp(54px, 10vw, 128px); margin-top: 18px; text-shadow: 0 4px 0 #000, 0 0 40px rgba(63, 208, 189, 0.25); }
-.hero h1 .glow { color: var(--crystal); text-shadow: 0 4px 0 #000, 0 0 36px rgba(63, 208, 189, 0.7); }
-.hero .lede { font-size: clamp(19px, 2.2vw, 23px); color: var(--ink); max-width: 34ch; margin-top: 22px; }
+.hero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 180px; background: linear-gradient(transparent, var(--rock)); z-index: -1; }
+.hero h1 { font-size: clamp(52px, 9.5vw, 124px); margin-top: 18px; text-shadow: 0 4px 0 #000; }
+.hero h1 .glow { color: var(--crystal); text-shadow: 0 4px 0 #000, 0 0 40px rgba(63,208,189,.75); }
+.lede { font-size: clamp(19px, 2.2vw, 23px); max-width: 36ch; margin-top: 24px; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
-.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 20px; font-family: var(--display); font-size: 18px; text-decoration: none; border-radius: 6px; border: 2px solid #000; transition: transform .15s ease, box-shadow .15s ease; }
-.btn-torch { background: var(--torch); color: #1b1206; box-shadow: 0 4px 0 #7a4c0e, 0 0 30px rgba(232, 163, 58, 0.35); }
+.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px; font-family: var(--display); font-size: 19px; text-decoration: none; border-radius: 6px; border: 2px solid #000; cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+.btn-torch { background: var(--torch); color: #1b1206; box-shadow: 0 4px 0 #7a4c0e, 0 0 34px rgba(232,163,58,.4); }
 .btn-stone { background: var(--rock-3); color: var(--ink); box-shadow: 0 4px 0 #000; }
 .btn:hover { transform: translateY(-2px); }
 .btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #000; }
-.hero-meta { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 40px; font-family: var(--mono); font-size: 13px; color: var(--ink-dim); }
-.hero-meta b { color: var(--ink); font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 40px; }
+.chip { font-size: 15px; padding: 7px 14px; border-radius: 999px; background: rgba(14,12,10,.7); border: 1px solid var(--line); backdrop-filter: blur(4px); }
+
+/* ---------- marquee ---------- */
+.marquee { overflow: hidden; border-block: 2px solid #000; background: var(--torch); color: #1b1206; font-family: var(--display); font-size: 22px; white-space: nowrap; }
+.marquee-track { display: inline-flex; gap: 40px; padding: 12px 0; animation: slide 30s linear infinite; }
+.marquee-track span::after { content: "◆"; margin-left: 40px; opacity: .5; }
+@keyframes slide { to { transform: translateX(-50%); } }
 
 /* ---------- sections ---------- */
-section { padding: 96px 0; border-top: 1px solid var(--line); }
-.sec-head { display: grid; gap: 14px; margin-bottom: 44px; }
-.sec-head h2 { font-size: clamp(36px, 5vw, 58px); }
-.sec-head p { color: var(--ink-dim); font-size: 19px; }
-.rise { transform: translateY(18px); transition: transform .8s cubic-bezier(.2, .7, .2, 1); }
+section { padding: 100px 0; }
+section + section { border-top: 1px solid var(--line); }
+.sec-head { display: grid; gap: 14px; margin-bottom: 48px; }
+.sec-head h2 { font-size: clamp(38px, 5.4vw, 64px); }
+.sec-head p { color: var(--ink-dim); font-size: 20px; }
+.rise { transform: translateY(18px); transition: transform .8s cubic-bezier(.2,.7,.2,1); }
 .rise.in { transform: none; }
 
-/* how it works: the loop */
-.loop { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; position: relative; }
-.loop::before { content: ""; position: absolute; top: 34px; left: 8%; right: 8%; height: 2px; background: repeating-linear-gradient(90deg, var(--crystal) 0 8px, transparent 8px 16px); opacity: .5; animation: march 1.2s linear infinite; }
+/* nerd drawers */
+details.nerd { margin-top: 28px; border: 1px dashed rgba(63,208,189,.35); border-radius: 10px; background: rgba(63,208,189,.04); }
+details.nerd summary { cursor: pointer; padding: 14px 18px; font-family: var(--mono); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--crystal); list-style: none; }
+details.nerd summary::-webkit-details-marker { display: none; }
+details.nerd summary::before { content: "+ "; }
+details.nerd[open] summary::before { content: "− "; }
+details.nerd ul { margin: 0; padding: 0 18px 18px 36px; color: var(--ink-dim); font-size: 15px; display: grid; gap: 6px; }
+details.nerd code { font-family: var(--mono); font-size: 13px; color: var(--ink); word-break: break-all; }
+
+/* ---------- the big idea ---------- */
+.versus { display: grid; grid-template-columns: 1fr auto 1fr; gap: 24px; align-items: stretch; margin-bottom: 64px; }
+.vs-card { border-radius: 12px; padding: 26px; border: 1px solid var(--line); }
+.vs-old { background: var(--rock-2); color: var(--ink-dim); }
+.vs-new { background: linear-gradient(160deg, rgba(63,208,189,.14), var(--rock-2)); border-color: rgba(63,208,189,.4); }
+.vs-card h3 { font-size: 26px; margin-bottom: 12px; }
+.vs-old h3 { color: var(--ink-dim); }
+.vs-card ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 17px; }
+.vs-mid { display: grid; place-items: center; font-family: var(--display); font-size: 28px; color: var(--torch); }
+@media (max-width: 760px) { .versus { grid-template-columns: 1fr; } .vs-mid { padding: 0; } }
+
+.loop { display: grid; grid-template-columns: repeat(3, 1fr); position: relative; }
+.loop::before { content: ""; position: absolute; top: 34px; left: 10%; right: 10%; height: 2px; background: repeating-linear-gradient(90deg, var(--crystal) 0 8px, transparent 8px 16px); opacity: .55; animation: march 1.2s linear infinite; }
 @keyframes march { to { background-position: 16px 0; } }
-.step { padding: 0 22px; position: relative; }
-.step-dot { width: 68px; height: 68px; display: grid; place-items: center; background: var(--rock-2); border: 2px solid var(--crystal); border-radius: 50%; font-family: var(--display); font-size: 26px; color: var(--crystal); box-shadow: 0 0 0 6px var(--rock), 0 0 24px rgba(63, 208, 189, 0.35); position: relative; z-index: 1; }
-.step h3 { font-size: 26px; margin: 22px 0 10px; }
+.step { padding: 0 22px; }
+.dot { width: 68px; height: 68px; display: grid; place-items: center; background: var(--rock-2); border: 2px solid var(--crystal); border-radius: 50%; font-size: 30px; box-shadow: 0 0 0 6px var(--rock), 0 0 26px rgba(63,208,189,.35); position: relative; z-index: 1; }
+.step h3 { font-size: 30px; margin: 22px 0 10px; }
 .step p { color: var(--ink-dim); font-size: 17px; }
-@media (max-width: 760px) { .loop { grid-template-columns: 1fr; gap: 34px; } .loop::before { display: none; } .step { padding: 0; } }
+@media (max-width: 760px) { .loop { grid-template-columns: 1fr; gap: 36px; } .loop::before { display: none; } .step { padding: 0; } }
 
-/* the heartbeat console */
-.console { margin-top: 56px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; }
-.term { background: #070605; border: 1px solid var(--line); border-radius: 10px; padding: 20px; font-family: var(--mono); font-size: 13.5px; line-height: 1.7; overflow-x: auto; min-height: 250px; }
-.term .dim { color: #6f6656; }
-.term .ok { color: var(--crystal); }
-.term .warn { color: var(--torch); }
-.term-title { display: flex; justify-content: space-between; color: #6f6656; font-size: 12px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: .1em; }
-.payout { background: linear-gradient(180deg, var(--rock-2), var(--rock)); border: 1px solid var(--line); border-radius: 10px; padding: 24px; display: grid; gap: 14px; align-content: start; }
-.payout .label { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
-.countdown { font-family: var(--display); font-size: 64px; color: var(--torch); font-variant-numeric: tabular-nums; line-height: 1; text-shadow: 0 0 30px rgba(232, 163, 58, 0.35); }
-.units { height: 10px; background: var(--rock-3); border-radius: 5px; overflow: hidden; }
-.units > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--crystal-deep), var(--crystal)); transition: width .6s ease; }
-.payout small { color: var(--ink-dim); font-size: 14px; }
-@media (max-width: 820px) { .console { grid-template-columns: 1fr; } }
+/* payday */
+.payday { margin-top: 60px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 24px; }
+.panel { background: var(--rock-2); border: 1px solid var(--line); border-radius: 12px; padding: 26px; }
+.panel .label { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
+.countdown { font-family: var(--display); font-size: clamp(64px, 9vw, 92px); color: var(--torch); font-variant-numeric: tabular-nums; line-height: 1; margin: 10px 0 12px; text-shadow: 0 0 34px rgba(232,163,58,.4); }
+.panel small { color: var(--ink-dim); font-size: 15px; display: block; }
+.feed { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; min-height: 196px; }
+.feed li { display: flex; gap: 10px; align-items: baseline; font-size: 16px; animation: pop .4s ease; }
+.feed li b { font-weight: 600; }
+.feed .ic { width: 22px; text-align: center; }
+@keyframes pop { from { opacity: .3; transform: translateX(-6px); } }
+.units { height: 12px; background: var(--rock-3); border-radius: 6px; overflow: hidden; margin-top: 16px; }
+.units > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--crystal-deep), var(--crystal)); transition: width .5s ease; }
+.unit-row { display: flex; justify-content: space-between; margin-top: 8px; font-size: 15px; color: var(--ink-dim); }
+@media (max-width: 820px) { .payday { grid-template-columns: 1fr; } }
 
-/* games: two columns of play */
-.games { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.game-col { border: 1px solid var(--line); border-radius: 12px; padding: 28px; background: var(--rock-2); position: relative; overflow: hidden; }
-.game-col::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; }
-.skill::before { background: var(--crystal); }
-.luck::before { background: var(--torch); }
-.game-col h3 { font-size: 34px; }
-.game-col .tag { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; margin-top: 8px; display: block; }
-.skill .tag { color: var(--crystal); }
-.luck .tag { color: var(--torch); }
-.game-list { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 14px; }
-.game-list li { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; padding-top: 14px; border-top: 1px solid var(--line); }
-.game-list b { font-family: var(--display); font-size: 21px; font-weight: 500; grid-column: 1 / -1; }
-.game-list span { color: var(--ink-dim); font-size: 16px; grid-column: 1 / -1; }
-.game-col .foot { margin-top: 20px; font-size: 15px; color: var(--ink-dim); }
-@media (max-width: 760px) { .games { grid-template-columns: 1fr; } }
+/* ---------- strike game ---------- */
+.strike { background: radial-gradient(700px 360px at 50% 0%, rgba(232,163,58,.12), transparent 70%), var(--rock); }
+.game { max-width: 720px; margin-inline: auto; background: #0a0807; border: 2px solid #000; border-radius: 14px; padding: 26px; box-shadow: 0 0 0 1px var(--line), 0 30px 60px rgba(0,0,0,.5); }
+.game-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.vein-name { font-family: var(--display); font-size: 26px; }
+.vein-lvl { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); letter-spacing: .08em; text-transform: uppercase; }
+.hp { height: 14px; background: var(--rock-3); border-radius: 7px; overflow: hidden; margin: 14px 0 22px; border: 1px solid #000; }
+.hp > i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #a55d1c, var(--torch)); transition: width .25s ease; }
+.track { position: relative; height: 64px; border-radius: 8px; background: linear-gradient(90deg, #2a221a, #3a2f23 50%, #2a221a); border: 2px solid #000; overflow: hidden; cursor: pointer; touch-action: manipulation; }
+.zone-good, .zone-perf { position: absolute; top: 0; bottom: 0; }
+.zone-good { background: rgba(232,163,58,.25); }
+.zone-perf { background: rgba(232,163,58,.85); box-shadow: 0 0 20px rgba(232,163,58,.8); }
+.marker { position: absolute; top: -4px; bottom: -4px; width: 6px; margin-left: -3px; background: #fff; box-shadow: 0 0 12px #fff; border-radius: 3px; }
+.game-bottom { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 22px; flex-wrap: wrap; }
+.verdict { font-family: var(--display); font-size: 30px; min-height: 40px; }
+.verdict.perfect { color: var(--torch); text-shadow: 0 0 18px rgba(232,163,58,.7); }
+.verdict.good { color: var(--ink); }
+.verdict.miss { color: #8a7f6c; }
+.verdict.clear { color: var(--crystal); text-shadow: 0 0 18px rgba(63,208,189,.7); }
+.tally { font-family: var(--mono); font-size: 13px; color: var(--ink-dim); margin-top: 16px; text-align: center; }
+.shake { animation: shake .18s; }
+@keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
 
-/* solana band */
-.chain { background: radial-gradient(900px 400px at 85% 10%, rgba(63, 208, 189, 0.12), transparent 70%), var(--rock); }
-.chain-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: start; }
-.facts { display: grid; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.fact { display: grid; grid-template-columns: 140px 1fr; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 16px; }
-.fact:last-child { border-bottom: 0; }
-.fact dt { color: var(--ink-dim); font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; padding-top: 3px; }
-.fact dd { margin: 0; word-break: break-all; }
-.chain .measure p + p { margin-top: 16px; }
-.chain .measure p { color: var(--ink-dim); }
-.chain .measure strong { color: var(--ink); }
-@media (max-width: 820px) { .chain-grid { grid-template-columns: 1fr; } .fact { grid-template-columns: 1fr; gap: 2px; } }
+/* ---------- world ---------- */
+.places { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.place { background: var(--rock-2); border: 1px solid var(--line); border-radius: 12px; padding: 22px; position: relative; overflow: hidden; }
+.place .icon { font-size: 30px; }
+.place h3 { font-size: 25px; margin: 10px 0 6px; }
+.place p { color: var(--ink-dim); font-size: 16px; }
+@media (max-width: 860px) { .places { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 540px) { .places { grid-template-columns: 1fr; } }
+.ladder { margin-top: 56px; }
+.ladder h3 { font-size: 30px; margin-bottom: 18px; }
+.rungs { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.rung { font-family: var(--display); font-size: 16px; padding: 10px 14px; border-radius: 6px; border: 2px solid #000; background: var(--rock-3); }
+.rung small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+.rung:last-child { background: linear-gradient(160deg, #3b2a5c, #1d1530); color: #e2d4ff; box-shadow: 0 0 20px rgba(160,120,255,.35); }
 
-/* safeguards */
-.guards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.guard { background: var(--rock); padding: 24px; }
-.guard h3 { font-family: var(--body); font-weight: 800; font-size: 19px; letter-spacing: 0; }
-.guard p { color: var(--ink-dim); font-size: 16px; margin-top: 8px; }
-@media (max-width: 820px) { .guards { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 520px) { .guards { grid-template-columns: 1fr; } }
+/* ---------- halls ---------- */
+.halls { display: grid; grid-template-columns: 1.15fr 1fr; gap: 24px; }
+.hall { border-radius: 14px; padding: 30px; border: 1px solid var(--line); background: var(--rock-2); position: relative; overflow: hidden; }
+.hall::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 5px; }
+.arena::before { background: var(--crystal); }
+.gambit::before { background: var(--torch); }
+.hall h3 { font-size: 38px; }
+.hall .tag { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; display: block; margin-top: 6px; }
+.arena .tag { color: var(--crystal); }
+.gambit .tag { color: var(--torch); }
+.hall > p { color: var(--ink-dim); margin-top: 14px; font-size: 17px; }
+.glist { list-style: none; margin: 20px 0 0; padding: 0; display: grid; gap: 12px; }
+.glist li { padding-top: 12px; border-top: 1px solid var(--line); }
+.glist b { font-family: var(--display); font-size: 21px; font-weight: 500; display: block; }
+.glist span { color: var(--ink-dim); font-size: 16px; }
+.burn { margin-top: 20px; padding: 14px 16px; border-radius: 8px; background: rgba(232,100,40,.1); border: 1px solid rgba(232,120,58,.35); font-size: 16px; }
+@media (max-width: 820px) { .halls { grid-template-columns: 1fr; } }
 
-/* roadmap: a mine shaft going down */
-.shaft { position: relative; padding-left: 46px; display: grid; gap: 28px; }
-.shaft::before { content: ""; position: absolute; left: 15px; top: 6px; bottom: 6px; width: 4px; background: linear-gradient(var(--crystal) 0 38%, var(--rock-3) 38%); border-radius: 2px; }
+/* ---------- solana ---------- */
+.chain { background: radial-gradient(900px 420px at 85% 0%, rgba(63,208,189,.13), transparent 70%), var(--rock); }
+.chain-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 44px; align-items: start; }
+.chain-copy p { color: var(--ink-dim); font-size: 19px; }
+.chain-copy p + p { margin-top: 18px; }
+.chain-copy strong { color: var(--ink); }
+.promises { display: grid; gap: 12px; }
+.promise { display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start; background: var(--rock-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+.promise .ic { font-size: 26px; line-height: 1; }
+.promise b { display: block; font-size: 18px; }
+.promise span { color: var(--ink-dim); font-size: 15px; }
+@media (max-width: 820px) { .chain-grid { grid-template-columns: 1fr; } }
+
+/* ---------- fair play ---------- */
+.guards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.guard { background: var(--rock); padding: 26px; }
+.guard .ic { font-size: 26px; }
+.guard h3 { font-family: var(--body); font-weight: 800; font-size: 20px; margin-top: 10px; }
+.guard p { color: var(--ink-dim); font-size: 16px; margin-top: 6px; }
+@media (max-width: 860px) { .guards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 540px) { .guards { grid-template-columns: 1fr; } }
+
+/* ---------- roadmap ---------- */
+.shaft { position: relative; padding-left: 48px; display: grid; gap: 30px; }
+.shaft::before { content: ""; position: absolute; left: 15px; top: 6px; bottom: 6px; width: 4px; background: linear-gradient(var(--crystal) 0 40%, var(--rock-3) 40%); border-radius: 2px; }
 .lvl { position: relative; }
-.lvl::before { content: ""; position: absolute; left: -38px; top: 6px; width: 16px; height: 16px; border-radius: 50%; background: var(--rock-3); border: 2px solid var(--rock-3); }
+.lvl::before { content: ""; position: absolute; left: -40px; top: 6px; width: 18px; height: 18px; border-radius: 50%; background: var(--rock-3); border: 2px solid var(--rock-3); }
 .lvl.done::before { background: var(--crystal); border-color: var(--crystal); box-shadow: 0 0 14px var(--crystal); }
-.lvl.now::before { background: var(--rock); border-color: var(--torch); box-shadow: 0 0 14px var(--torch); animation: beat 1.6s ease-in-out infinite; }
-@keyframes beat { 50% { transform: scale(1.25); } }
+.lvl.now::before { background: var(--rock); border-color: var(--torch); box-shadow: 0 0 16px var(--torch); animation: beat 1.6s ease-in-out infinite; }
+@keyframes beat { 50% { transform: scale(1.3); } }
 .lvl .depth { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); letter-spacing: .1em; text-transform: uppercase; }
-.lvl h3 { font-family: var(--body); font-weight: 800; font-size: 22px; margin-top: 2px; letter-spacing: 0; }
-.lvl p { color: var(--ink-dim); font-size: 16px; margin-top: 4px; max-width: 60ch; }
+.lvl h3 { font-family: var(--body); font-weight: 800; font-size: 23px; margin-top: 2px; }
+.lvl p { color: var(--ink-dim); font-size: 17px; margin-top: 4px; max-width: 60ch; }
 .state { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: 3px; }
-.done .state { background: rgba(63, 208, 189, 0.15); color: var(--crystal); }
-.now .state { background: rgba(232, 163, 58, 0.15); color: var(--torch); }
+.done .state { background: rgba(63,208,189,.15); color: var(--crystal); }
+.now .state { background: rgba(232,163,58,.18); color: var(--torch); }
 .later .state { background: var(--rock-3); color: var(--ink-dim); }
 
-/* footer */
-footer { border-top: 1px solid var(--line); padding: 48px 0 64px; color: var(--ink-dim); font-size: 15px; }
-footer .wrap { display: grid; gap: 14px; }
+/* ---------- final call ---------- */
+.final { text-align: center; padding: 120px 0; background: radial-gradient(600px 320px at 50% 100%, rgba(63,208,189,.16), transparent 70%), var(--rock); }
+.final h2 { font-size: clamp(46px, 8vw, 96px); }
+.final p { color: var(--ink-dim); font-size: 21px; max-width: 46ch; margin: 20px auto 0; }
+.final .cta { justify-content: center; }
+
+footer { border-top: 1px solid var(--line); padding: 44px 0 64px; color: var(--ink-dim); font-size: 15px; }
+footer .wrap { display: grid; gap: 12px; }
 footer strong { color: var(--ink); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .rise { transform: none; transition: none; }
-  .loop::before, .lvl.now::before { animation: none; }
+  .loop::before, .lvl.now::before, .marquee-track { animation: none; }
+  .feed li { animation: none; }
 }
 </style>
 </head>
@@ -175,14 +241,15 @@ footer strong { color: var(--ink); }
 
 <header class="bar">
   <div class="wrap">
-    <a class="brand" href="#top"><span class="brand-gem" aria-hidden="true"></span>Pulse</a>
+    <a class="brand" href="#top"><span class="gem" aria-hidden="true"></span>Pulse</a>
     <nav aria-label="Sections">
       <a href="#how">How it works</a>
-      <a href="#games">Games</a>
-      <a href="#solana">PULSE on Solana</a>
-      <a href="#future">The future</a>
+      <a href="#play">Try it</a>
+      <a href="#world">The world</a>
+      <a href="#solana">PULSE</a>
+      <a href="#future">What's next</a>
     </nav>
-    <span class="pill">Testnet</span>
+    <span class="pill">Now in testing</span>
   </div>
 </header>
 
@@ -190,90 +257,185 @@ footer strong { color: var(--ink); }
   <div class="hero">
     <canvas id="cave" aria-hidden="true"></canvas>
     <div class="wrap">
-      <p class="kicker">A mining game for Android</p>
-      <h1>Your phone<br>is the <span class="glow">mine.</span></h1>
-      <p class="lede">Swing your pickaxe and your phone becomes a node in the Pulse network. That node time is the only thing that creates PLS.</p>
+      <p class="kicker">Free 3D mining game for Android</p>
+      <h1>Swing the pick.<br><span class="glow">Power the network.</span></h1>
+      <p class="lede">In Pulse, your phone doesn't just play the game. <strong>It runs it.</strong> Every swing helps keep the network alive, and every 10 minutes the network pays you back.</p>
       <div class="cta">
-        <a class="btn btn-torch" href="#how">See how it works</a>
-        <a class="btn btn-stone" href="https://explorer.solana.com/address/DpdUyYp9FUMhBVXaMNpwoTy1c9pzYZ4TwHcjVhUgL3vL?cluster=devnet">PULSE on Solana devnet</a>
+        <a class="btn btn-torch" href="#play">⛏ Try a strike</a>
+        <a class="btn btn-stone" href="#how">How it works</a>
       </div>
-      <div class="hero-meta">
-        <span><b>30 s</b> between signed heartbeats</span>
-        <span><b>10 min</b> payout periods</span>
-        <span><b>Token-2022</b> on Solana devnet</span>
+      <div class="chips">
+        <span class="chip">📱 Just your phone</span>
+        <span class="chip">⚡ Payday every 10 minutes</span>
+        <span class="chip">◎ Token on Solana</span>
+        <span class="chip">⚔ Skill duels</span>
       </div>
+    </div>
+  </div>
+
+  <div class="marquee" aria-hidden="true">
+    <div class="marquee-track">
+      <span>No mining rigs</span><span>No buy-in</span><span>No crazy power bill</span><span>Just your phone and a pickaxe</span>
+      <span>No mining rigs</span><span>No buy-in</span><span>No crazy power bill</span><span>Just your phone and a pickaxe</span>
     </div>
   </div>
 
   <section id="how">
     <div class="wrap">
       <div class="sec-head rise">
-        <p class="kicker">How it works</p>
-        <h2>Mine, pulse, get paid.</h2>
-        <p class="measure">Pulse is a lamp-lit cave you mine with timed strikes. While you mine, your phone quietly proves it is online and doing its part.</p>
+        <p class="kicker">The big idea</p>
+        <h2>Mining used to need a warehouse.<br><span class="amber">Now it needs your thumb.</span></h2>
       </div>
-      <div class="loop rise">
-        <div class="step">
-          <div class="step-dot">1</div>
-          <h3>Strike the vein</h3>
-          <p>Tap when the marker hits the gold zone. Perfect strikes break veins faster and drop more ore for the forge.</p>
+
+      <div class="versus rise">
+        <div class="vs-card vs-old">
+          <h3>Old-school crypto mining</h3>
+          <ul>
+            <li>Rooms full of roaring computers</li>
+            <li>Huge electricity bills</li>
+            <li>Thousands of dollars of gear before you earn a thing</li>
+          </ul>
         </div>
-        <div class="step">
-          <div class="step-dot">2</div>
-          <h3>Your phone pulses</h3>
-          <p>Every 30 seconds it signs a heartbeat with its own key. The key never leaves the phone.</p>
-        </div>
-        <div class="step">
-          <div class="step-dot">3</div>
-          <h3>Paid every 10 minutes</h3>
-          <p>Each accepted heartbeat is one unit. Ten units make 1 PLS, settled into your balance every ten minutes.</p>
+        <div class="vs-mid" aria-hidden="true">→</div>
+        <div class="vs-card vs-new">
+          <h3>Pulse</h3>
+          <ul>
+            <li>The phone already in your pocket</li>
+            <li>Your phone helps run the network while you play</li>
+            <li>Free to start. You can't buy your way in.</li>
+          </ul>
         </div>
       </div>
 
-      <div class="console rise">
-        <div class="term" role="img" aria-label="Example node heartbeats being signed and accepted">
-          <div class="term-title"><span>node log (example)</span><span id="term-clock"></span></div>
-          <div id="log"></div>
+      <div class="loop rise">
+        <div class="step">
+          <div class="dot" aria-hidden="true">⛏</div>
+          <h3>Swing</h3>
+          <p>Time your strikes to hit the gold zone. Perfect hits crack veins faster, haul more ore and level you up.</p>
         </div>
-        <div class="payout">
-          <span class="label">Next payout in</span>
+        <div class="step">
+          <div class="dot" aria-hidden="true">📡</div>
+          <h3>Check in</h3>
+          <p>While you mine, your phone becomes a <strong>node</strong>, a working part of the network. It checks in every 30 seconds, signed with a digital fingerprint only your phone can make.</p>
+        </div>
+        <div class="step">
+          <div class="dot" aria-hidden="true">💎</div>
+          <h3>Payday</h3>
+          <p>Every 10 minutes the network adds up every check-in and pays out. Ten check-ins earn you 1 PLS, the Pulse coin.</p>
+        </div>
+      </div>
+
+      <div class="payday rise">
+        <div class="panel">
+          <span class="label">Next network payday in</span>
           <div class="countdown" id="countdown">--:--</div>
-          <span class="label">Units this period (example)</span>
+          <small>This clock is real. Paydays hit at :00, :10, :20 and so on, all day, every day.</small>
+        </div>
+        <div class="panel">
+          <span class="label">What your phone is doing while you mine (example)</span>
+          <ul class="feed" id="feed" aria-live="off"></ul>
           <div class="units"><i id="unitbar"></i></div>
-          <small id="unittext">0 units</small>
-          <small>Payouts land at :00, :10, :20 and so on. The clock above is real.</small>
+          <div class="unit-row"><span id="unittext">0 / 10 check-ins</span><span class="teal">→ 1 PLS</span></div>
+        </div>
+      </div>
+
+      <details class="nerd rise">
+        <summary>For the nerds: how a check-in works</summary>
+        <ul>
+          <li>Each phone makes its own RSA-2048 key pair on first launch. The private key never leaves the phone.</li>
+          <li>The phone opens a session with a signed handshake, then sends a signed heartbeat every 30 seconds.</li>
+          <li>Every heartbeat carries a sequence number that must keep going up, so recorded heartbeats can't be replayed.</li>
+          <li>Settlement runs every 600 seconds and pays each node exactly once per period.</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <section id="play" class="strike">
+    <div class="wrap">
+      <div class="sec-head rise" style="text-align:center; justify-items:center;">
+        <p class="kicker">Feel it</p>
+        <h2>Try a strike.</h2>
+        <p class="measure">This is the heart of Pulse. Tap when the marker hits the glowing gold. Break the vein, then go deeper.</p>
+      </div>
+      <div class="game rise">
+        <div class="game-top">
+          <span class="vein-name" id="vname">Coal Seam</span>
+          <span class="vein-lvl" id="vlvl">Vein 1 of 4</span>
+        </div>
+        <div class="hp" aria-hidden="true"><i id="hpbar"></i></div>
+        <div class="track" id="track" aria-hidden="true">
+          <div class="zone-good" id="zgood"></div>
+          <div class="zone-perf" id="zperf"></div>
+          <div class="marker" id="marker"></div>
+        </div>
+        <div class="game-bottom">
+          <span class="verdict" id="verdict" aria-live="polite">Ready?</span>
+          <button class="btn btn-torch" id="strikeBtn" type="button">STRIKE</button>
+        </div>
+        <p class="tally" id="tally">Perfect 0 · Good 0 · Miss 0</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="world">
+    <div class="wrap">
+      <div class="sec-head rise">
+        <p class="kicker">The world</p>
+        <h2>A whole adventure<br>in your pocket.</h2>
+        <p class="measure">Old-school 3D adventure vibes, built for one thumb. A lamp-lit town with a glowing crystal at its heart, and a mine that goes deeper than you'd think.</p>
+      </div>
+      <div class="places rise">
+        <div class="place"><div class="icon">⛏</div><h3>The Mine</h3><p>Four veins, from the Coal Seam down to the Void Rift. No random drops. Every ore is earned by your timing.</p></div>
+        <div class="place"><div class="icon">🔨</div><h3>The Forge</h3><p>Turn ore into pickaxes and gear, then upgrade them to dig faster and unlock deeper veins.</p></div>
+        <div class="place"><div class="icon">⚔</div><h3>The Arena</h3><p>1v1 skill duels and weekly cups. Gear means nothing here. Only you.</p></div>
+        <div class="place"><div class="icon">🎲</div><h3>The Gambit Hall</h3><p>Fast luck games with rolls you can check for yourself.</p></div>
+        <div class="place"><div class="icon">🍺</div><h3>The Tavern</h3><p>Chat with other miners and start a crew of up to 20 with its own weekly leaderboard.</p></div>
+        <div class="place"><div class="icon">📜</div><h3>The Notice Board</h3><p>Daily quests, weekly leaderboards and a live look at the whole economy.</p></div>
+      </div>
+      <div class="ladder rise">
+        <h3>Rise from nobody to legend.</h3>
+        <div class="rungs">
+          <span class="rung"><small>Lv 1</small>Pebble Picker</span>
+          <span class="rung"><small>Lv 3</small>Tunnel Rat</span>
+          <span class="rung"><small>Lv 6</small>Ore Hound</span>
+          <span class="rung"><small>Lv 10</small>Vein Seeker</span>
+          <span class="rung"><small>Lv 15</small>Deep Delver</span>
+          <span class="rung"><small>Lv 20</small>Crystal Warden</span>
+          <span class="rung"><small>Lv 30</small>Void Walker</span>
         </div>
       </div>
     </div>
   </section>
 
-  <section id="games">
+  <section id="halls">
     <div class="wrap">
       <div class="sec-head rise">
         <p class="kicker">Stake your PLS</p>
-        <h2>Two halls. Skill or luck.</h2>
-        <p class="measure">Gear helps you mine, never in a duel. Skill games give both players the exact same challenge. Luck games are provably fair, so you can check every roll yourself.</p>
+        <h2>Back yourself.</h2>
+        <p class="measure">Put your PLS on the line against real players. Two halls, two kinds of nerve.</p>
       </div>
-      <div class="games rise">
-        <div class="game-col skill">
+      <div class="halls rise">
+        <div class="hall arena">
           <h3>The Arena</h3>
-          <span class="tag">Skill wagering</span>
-          <ul class="game-list">
-            <li><b>Quickdraw</b><span>Five rounds. Tap the moment the pad turns green.</span></li>
-            <li><b>Rune Sequence</b><span>Watch the runes light up and repeat them, one longer each round.</span></li>
-            <li><b>Vein Sniper</b><span>Twelve veins flash on a grid. Faster hits score more.</span></li>
+          <span class="tag">Pure skill</span>
+          <p>Both players get the exact same challenge. Same pattern, same timing, same everything. The only difference is you.</p>
+          <ul class="glist">
+            <li><b>Quickdraw</b><span>Five rounds. Tap the instant the pad flashes green. Fastest hands win.</span></li>
+            <li><b>Rune Sequence</b><span>Memorize the glowing runes. Each round adds one more. Who cracks first?</span></li>
+            <li><b>Vein Sniper</b><span>Twelve veins flash across a grid. Hit them fast. Hit them first.</span></li>
           </ul>
-          <p class="foot">Ranked 1v1 duels and weekly cups. 5% of every duel pot is burned.</p>
+          <div class="burn">🔥 <strong>5% of every duel pot is burned.</strong> Gone forever. Every duel makes PLS a little rarer.</div>
         </div>
-        <div class="game-col luck">
+        <div class="hall gambit">
           <h3>The Gambit Hall</h3>
-          <span class="tag">Luck wagering</span>
-          <ul class="game-list">
-            <li><b>Crystal Flip</b><span>Call teal or amber. Pays 1.94x.</span></li>
-            <li><b>Ore Dice</b><span>Roll 0.00 to 99.99 and land under your target.</span></li>
-            <li><b>Cave-In</b><span>Uncover safe tiles on a 5x5 field and cash out before the roof falls.</span></li>
+          <span class="tag">Pure luck</span>
+          <p>Every roll is sealed before you play. Afterward you can unseal it and prove nobody cheated, not even us.</p>
+          <ul class="glist">
+            <li><b>Crystal Flip</b><span>Teal or amber. Call it.</span></li>
+            <li><b>Ore Dice</b><span>Pick your target and roll under it.</span></li>
+            <li><b>Cave-In</b><span>Dig safe tiles and cash out before the roof comes down.</span></li>
           </ul>
-          <p class="foot">3% house edge, about 97% paid back. Every result comes from a seed you can verify.</p>
         </div>
       </div>
     </div>
@@ -281,37 +443,48 @@ footer strong { color: var(--ink); }
 
   <section id="solana" class="chain">
     <div class="wrap chain-grid">
-      <div class="measure rise">
+      <div class="chain-copy rise">
         <p class="kicker">PULSE on Solana</p>
-        <h2 style="font-size: clamp(36px, 5vw, 58px); margin: 14px 0 22px;">Proof you can check.</h2>
-        <p>Pulse runs on its own servers for the fast parts: handshakes, heartbeats and rewards. Solana is where ownership lives, so anyone can see how much PULSE exists and where it went.</p>
-        <p>Right now that runs on <strong>Solana devnet</strong>, a public test network. Every node reward is also minted as devnet PULSE to the player's own wallet, and <strong>nothing else mints it</strong>.</p>
-        <p>Devnet PULSE has no cash value. Your in-game PLS stays separate from it.</p>
+        <h2 style="font-size: clamp(38px, 5.4vw, 64px); margin: 14px 0 24px;">Every coin,<br><span class="teal">out in the open.</span></h2>
+        <p>PULSE lives on <strong>Solana</strong>, one of the fastest blockchains on the planet. A blockchain is a public record that nobody can secretly edit. So anyone, anywhere can count every PULSE that exists and see exactly where it went.</p>
+        <p>Link a Solana wallet in the app and every reward you earn as a node is also sent to you as a <strong>real PULSE token</strong>, in your own wallet, under your own control.</p>
+        <p>Right now this runs on Solana's test network: the full dress rehearsal before launch. <strong>Test tokens, real tech.</strong></p>
+        <div class="cta">
+          <a class="btn btn-stone" href="https://explorer.solana.com/address/DpdUyYp9FUMhBVXaMNpwoTy1c9pzYZ4TwHcjVhUgL3vL?cluster=devnet">◎ See PULSE on Solana</a>
+        </div>
       </div>
-      <dl class="facts rise">
-        <div class="fact"><dt>Mint</dt><dd class="mono"><a href="https://explorer.solana.com/address/DpdUyYp9FUMhBVXaMNpwoTy1c9pzYZ4TwHcjVhUgL3vL?cluster=devnet">DpdUyYp9FUMhBVXaMNpwoTy1c9pzYZ4TwHcjVhUgL3vL</a></dd></div>
-        <div class="fact"><dt>Network</dt><dd>Solana devnet</dd></div>
-        <div class="fact"><dt>Standard</dt><dd>Token-2022, 9 decimals</dd></div>
-        <div class="fact"><dt>Minted by</dt><dd>Node rewards only</dd></div>
-        <div class="fact"><dt>Freeze</dt><dd>No freeze authority: nobody can freeze holders</dd></div>
-        <div class="fact"><dt>Wallets</dt><dd>Phantom or Solflare set to devnet</dd></div>
-      </dl>
+      <div class="promises rise">
+        <div class="promise"><span class="ic">📡</span><div><b>Only phones make new coins</b><span>Right now, the only thing that creates PULSE is phones running the network. No secret stash.</span></div></div>
+        <div class="promise"><span class="ic">🧊</span><div><b>Nobody can freeze your tokens</b><span>The token was built with no freeze switch. Not even we can lock your wallet.</span></div></div>
+        <div class="promise"><span class="ic">🔍</span><div><b>Check it yourself</b><span>Every new token shows up on the public Solana explorer the moment it's made.</span></div></div>
+        <div class="promise"><span class="ic">👛</span><div><b>Works with wallets people already use</b><span>Phantom or Solflare, switched to the test network.</span></div></div>
+        <details class="nerd" style="margin-top: 4px;">
+          <summary>For the nerds: token specs</summary>
+          <ul>
+            <li>Mint: <code>DpdUyYp9FUMhBVXaMNpwoTy1c9pzYZ4TwHcjVhUgL3vL</code></li>
+            <li>Token-2022 program, 9 decimals, no freeze authority</li>
+            <li>Minted with MintToChecked into each player's associated token account</li>
+            <li>In-game PLS and on-chain PULSE are kept as separate balances</li>
+          </ul>
+        </details>
+      </div>
     </div>
   </section>
 
   <section id="fair">
     <div class="wrap">
       <div class="sec-head rise">
-        <p class="kicker">Built to resist cheating</p>
-        <h2>A node has to earn its place.</h2>
+        <p class="kicker">Fair play</p>
+        <h2>Cheaters don't get paid.</h2>
+        <p class="measure">A network that pays people is a network people will try to fool. Pulse was built for that from day one.</p>
       </div>
       <div class="guards rise">
-        <div class="guard"><h3>Signed by the phone</h3><p>Every handshake and heartbeat carries a signature only that phone's key can make.</p></div>
-        <div class="guard"><h3>No replays</h3><p>Each heartbeat has a number that only goes up. An old one is refused.</p></div>
-        <div class="guard"><h3>Real mining only</h3><p>Heartbeats count only when the server sees genuine mining strikes from your account.</p></div>
-        <div class="guard"><h3>One phone earns at a time</h3><p>Extra phones on one account sit out while another is earning.</p></div>
-        <div class="guard"><h3>Caps on issuance</h3><p>A daily limit per player and an hourly limit for the whole network keep supply in check.</p></div>
-        <div class="guard"><h3>Paid exactly once</h3><p>Every payout has a record, and the ledger always balances to zero.</p></div>
+        <div class="guard"><div class="ic">🖐</div><h3>Fingerprinted phones</h3><p>Each phone has a secret key that never leaves it. A faked check-in won't match.</p></div>
+        <div class="guard"><div class="ic">🔁</div><h3>No copy-paste</h3><p>Every check-in is numbered. Send an old one again and it bounces.</p></div>
+        <div class="guard"><div class="ic">⛏</div><h3>Real swings only</h3><p>Check-ins only count while you're actually mining. Idle phones don't earn.</p></div>
+        <div class="guard"><div class="ic">📱</div><h3>One phone, one paycheck</h3><p>Ten phones on one account don't earn ten times. Only one earns at a time.</p></div>
+        <div class="guard"><div class="ic">🚦</div><h3>Speed limits on new coins</h3><p>Daily limits per player and a cap for the whole network keep supply in check.</p></div>
+        <div class="guard"><div class="ic">📒</div><h3>Books that always balance</h3><p>Every coin is recorded leaving one place and arriving in another. Nothing appears from thin air.</p></div>
       </div>
     </div>
   </section>
@@ -319,18 +492,29 @@ footer strong { color: var(--ink); }
   <section id="future">
     <div class="wrap">
       <div class="sec-head rise">
-        <p class="kicker">The future</p>
-        <h2>Deeper levels ahead.</h2>
-        <p class="measure">Pulse goes down one level at a time. Nothing moves to Solana mainnet before the token plan is final and the legal review is done.</p>
+        <p class="kicker">What's next</p>
+        <h2>We're still digging.</h2>
+        <p class="measure">Pulse goes deeper one level at a time. Three levels are already live.</p>
       </div>
       <div class="shaft rise">
-        <div class="lvl done"><span class="depth">Level 1</span><h3>Phone nodes <span class="state">Live</span></h3><p>Registration, signed handshakes and heartbeats while you mine.</p></div>
-        <div class="lvl done"><span class="depth">Level 2</span><h3>Reward ledger <span class="state">Live</span></h3><p>Node time becomes PLS every ten minutes, with full records and audits.</p></div>
-        <div class="lvl done"><span class="depth">Level 3</span><h3>Devnet PULSE <span class="state">Live</span></h3><p>Node rewards minted as a test token on Solana, visible to anyone.</p></div>
-        <div class="lvl now"><span class="depth">Level 4</span><h3>Real-phone testing <span class="state">Now</span></h3><p>A trial with real players to tune the reward rate and catch abuse.</p></div>
-        <div class="lvl later"><span class="depth">Level 5</span><h3>Final token plan <span class="state">Next</span></h3><p>A fixed maximum supply, released to nodes on a set schedule.</p></div>
-        <div class="lvl later"><span class="depth">Level 6</span><h3>Wallet connect <span class="state">Later</span></h3><p>Connect Phantom or Solflare straight from the app on Android.</p></div>
-        <div class="lvl later"><span class="depth">Level 7</span><h3>Mainnet, after legal review <span class="state">Later</span></h3><p>PULSE on Solana mainnet, with authorities held by a multisig and every permission documented.</p></div>
+        <div class="lvl done"><span class="depth">Level 1</span><h3>Phones become nodes <span class="state">Live</span></h3><p>Your phone joins the network the moment you start mining.</p></div>
+        <div class="lvl done"><span class="depth">Level 2</span><h3>Payday every 10 minutes <span class="state">Live</span></h3><p>Node time turns into PLS automatically, with every coin on the books.</p></div>
+        <div class="lvl done"><span class="depth">Level 3</span><h3>PULSE on Solana <span class="state">Live</span></h3><p>Rewards land as a real token on Solana's test network, visible to the whole world.</p></div>
+        <div class="lvl now"><span class="depth">Level 4</span><h3>Open testing <span class="state">Now</span></h3><p>Real players, real phones. Tuning rewards, hunting cheaters, polishing the world. This is where you come in.</p></div>
+        <div class="lvl later"><span class="depth">Level 5</span><h3>The final token plan <span class="state">Next</span></h3><p>A fixed total supply, released to phones on a set schedule. No surprise printing, ever.</p></div>
+        <div class="lvl later"><span class="depth">Level 6</span><h3>One-tap wallets <span class="state">Later</span></h3><p>Connect Phantom or Solflare straight from the app.</p></div>
+        <div class="lvl later"><span class="depth">Level 7</span><h3>The real launch <span class="state">Later</span></h3><p>PULSE on Solana's main network, once the legal side is fully sorted. We won't rush this one.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2 class="rise">The cave is <span class="amber">open.</span></h2>
+      <p class="rise">Pulse is in testing right now. Early miners help shape everything: the rewards, the games, the world.</p>
+      <div class="cta rise">
+        <a class="btn btn-torch" href="https://github.com/shotgunsmiley/pulse">Follow Pulse on GitHub</a>
+        <a class="btn btn-stone" href="#play">One more strike</a>
       </div>
     </div>
   </section>
@@ -338,8 +522,8 @@ footer strong { color: var(--ink); }
 
 <footer>
   <div class="wrap">
-    <p><strong>Pulse Network</strong> is in testing. PLS and devnet PULSE are test balances with no cash value, cannot be bought, and are not an investment.</p>
-    <p>Original game art. Code on <a href="https://github.com/shotgunsmiley/pulse">GitHub</a>.</p>
+    <p><strong>Pulse Network</strong> is in testing. PLS and test PULSE have no cash value, can't be bought, and aren't an investment.</p>
+    <p>Original game and art. Code on <a href="https://github.com/shotgunsmiley/pulse">GitHub</a>.</p>
   </div>
 </footer>
 
@@ -347,146 +531,190 @@ footer strong { color: var(--ink); }
 (() => {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* ---------- hero: a cave with a pulsing crystal and a node network ---------- */
+  /* ---------- hero: cave, pulsing crystal, node network ---------- */
   const cv = document.getElementById('cave');
   const cx = cv.getContext('2d');
-  let W = 0, H = 0, DPR = 1, nodes = [], motes = [], rings = [], t0 = performance.now();
+  let W = 0, H = 0, nodes = [], motes = [], rings = [];
+  const t0 = performance.now();
   function size() {
-    DPR = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
     W = cv.clientWidth; H = cv.clientHeight;
-    cv.width = W * DPR; cv.height = H * DPR;
-    cx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const n = Math.round(Math.min(26, Math.max(12, W / 50)));
+    cv.width = W * dpr; cv.height = H * dpr;
+    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(28, Math.max(12, W / 46)));
     nodes = Array.from({ length: n }, (_, i) => ({
-      x: W * (0.45 + 0.55 * ((i * 0.618) % 1)), y: H * (0.12 + 0.76 * ((i * 0.377 + 0.13) % 1)),
+      x: W * (0.42 + 0.58 * ((i * 0.618) % 1)), y: H * (0.1 + 0.8 * ((i * 0.377 + 0.13) % 1)),
       r: 2 + (i % 3), ph: i * 1.7, lit: 0
     }));
-    motes = Array.from({ length: 70 }, (_, i) => ({ x: Math.random() * W, y: Math.random() * H, s: 0.2 + Math.random() * 0.6, a: Math.random() }));
+    motes = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: 0.2 + Math.random() * 0.6, a: Math.random() }));
   }
   size();
   addEventListener('resize', size);
 
   function crystal(x, y, s, glow) {
-    cx.save();
-    cx.translate(x, y);
-    const g = cx.createRadialGradient(0, 0, 0, 0, 0, s * 3.2);
-    g.addColorStop(0, `rgba(63,208,189,${0.32 * glow})`);
-    g.addColorStop(1, 'rgba(63,208,189,0)');
-    cx.fillStyle = g;
-    cx.beginPath(); cx.arc(0, 0, s * 3.2, 0, Math.PI * 2); cx.fill();
-    const shards = [[0, -1.3, .45, 1.0], [-.55, -.7, .32, .7], [.6, -.6, .3, .65], [-.2, -1.0, .2, .5]];
-    for (const [dx, h, w, k] of shards) {
-      cx.beginPath();
-      cx.moveTo(dx * s - w * s, 0);
-      cx.lineTo(dx * s, h * s);
-      cx.lineTo(dx * s + w * s, 0);
-      cx.closePath();
+    cx.save(); cx.translate(x, y);
+    const g = cx.createRadialGradient(0, 0, 0, 0, 0, s * 3.4);
+    g.addColorStop(0, `rgba(63,208,189,${0.34 * glow})`); g.addColorStop(1, 'rgba(63,208,189,0)');
+    cx.fillStyle = g; cx.beginPath(); cx.arc(0, 0, s * 3.4, 0, Math.PI * 2); cx.fill();
+    for (const [dx, h, w] of [[0, -1.35, .45], [-.55, -.72, .32], [.6, -.62, .3], [-.2, -1.0, .2]]) {
+      cx.beginPath(); cx.moveTo(dx * s - w * s, 0); cx.lineTo(dx * s, h * s); cx.lineTo(dx * s + w * s, 0); cx.closePath();
       const lg = cx.createLinearGradient(dx * s - w * s, h * s, dx * s + w * s, 0);
       lg.addColorStop(0, '#c9fff6'); lg.addColorStop(.45, '#3fd0bd'); lg.addColorStop(1, '#0f5a52');
-      cx.globalAlpha = .85 + .15 * k * glow;
-      cx.fillStyle = lg; cx.fill();
+      cx.globalAlpha = .85 + .15 * glow; cx.fillStyle = lg; cx.fill();
     }
-    cx.globalAlpha = 1;
-    cx.fillStyle = '#2a221a';
+    cx.globalAlpha = 1; cx.fillStyle = '#2a221a';
     cx.beginPath(); cx.ellipse(0, 4, s * 1.4, s * .28, 0, 0, Math.PI * 2); cx.fill();
     cx.restore();
   }
 
   function frame(now) {
     const t = (now - t0) / 1000;
-    cx.clearRect(0, 0, W, H);
-    // cave walls: warm torchlight on the left, deep rock to the right
     const bg = cx.createRadialGradient(W * .78, H * .55, 20, W * .78, H * .55, Math.max(W, H) * .8);
     bg.addColorStop(0, '#1b2421'); bg.addColorStop(.45, '#120f0c'); bg.addColorStop(1, '#0a0806');
     cx.fillStyle = bg; cx.fillRect(0, 0, W, H);
+    const flick = .17 + .03 * Math.sin(t * 7) + .02 * Math.sin(t * 13.3);
     const torch = cx.createRadialGradient(W * .05, H * .2, 0, W * .05, H * .2, W * .5);
-    const flick = .16 + .03 * Math.sin(t * 7) + .02 * Math.sin(t * 13.3);
     torch.addColorStop(0, `rgba(232,163,58,${flick})`); torch.addColorStop(1, 'rgba(232,163,58,0)');
     cx.fillStyle = torch; cx.fillRect(0, 0, W, H);
 
-    // the pulse: a heartbeat every 2.5 s sends a ring out from the crystal
-    const ccx = W * .78, ccy = H * .62, cs = Math.min(70, W * .07);
+    const ccx = W * .8, ccy = H * .64, cs = Math.min(72, W * .07);
     const beat = (t % 2.5) / 2.5;
-    if (beat < 0.02 && (!rings.length || t - rings[rings.length - 1].t > 1)) rings.push({ t });
+    if (beat < 0.03 && (!rings.length || t - rings[rings.length - 1].t > 1)) rings.push({ t });
     rings = rings.filter(r => t - r.t < 3.2);
-    // links between nodes
     cx.lineWidth = 1;
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i], b = nodes[j];
-        const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (d < 190) {
-          cx.strokeStyle = `rgba(63,208,189,${0.10 * (1 - d / 190) + 0.25 * Math.min(a.lit, b.lit)})`;
-          cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(b.x, b.y); cx.stroke();
-        }
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j], d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (d < 190) {
+        cx.strokeStyle = `rgba(63,208,189,${0.1 * (1 - d / 190) + 0.28 * Math.min(a.lit, b.lit)})`;
+        cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(b.x, b.y); cx.stroke();
       }
     }
     for (const r of rings) {
       const age = t - r.t, rad = age * 260;
-      cx.strokeStyle = `rgba(63,208,189,${Math.max(0, .45 - age * .14)})`;
-      cx.lineWidth = 2;
+      cx.strokeStyle = `rgba(63,208,189,${Math.max(0, .45 - age * .14)})`; cx.lineWidth = 2;
       cx.beginPath(); cx.arc(ccx, ccy - cs * .5, rad, 0, Math.PI * 2); cx.stroke();
-      for (const n of nodes) {
-        const d = Math.hypot(n.x - ccx, n.y - (ccy - cs * .5));
-        if (Math.abs(d - rad) < 14) n.lit = 1;
-      }
+      for (const n of nodes) if (Math.abs(Math.hypot(n.x - ccx, n.y - (ccy - cs * .5)) - rad) < 14) n.lit = 1;
     }
     for (const n of nodes) {
       n.lit *= 0.965;
-      const g = 0.35 + 0.65 * n.lit;
-      cx.fillStyle = `rgba(${n.lit > .3 ? '201,255,246' : '63,208,189'},${g})`;
+      cx.fillStyle = `rgba(${n.lit > .3 ? '201,255,246' : '63,208,189'},${0.35 + 0.65 * n.lit})`;
       cx.beginPath(); cx.arc(n.x, n.y + Math.sin(t + n.ph) * 2, n.r + n.lit * 2, 0, Math.PI * 2); cx.fill();
     }
     crystal(ccx, ccy, cs, 0.7 + 0.3 * Math.max(0, 1 - beat * 4));
-    // dust in the lamplight
     for (const m of motes) {
       m.y -= m.s * 0.25; m.x += Math.sin(t * .5 + m.a * 6) * 0.15;
       if (m.y < -5) { m.y = H + 5; m.x = Math.random() * W; }
       cx.fillStyle = `rgba(241,230,207,${0.12 + 0.18 * Math.abs(Math.sin(t + m.a * 9))})`;
       cx.fillRect(m.x, m.y, 1.5, 1.5);
     }
-    if (!reduce) requestAnimationFrame(frame);
+    if (!reduce && heroVisible) requestAnimationFrame(frame); else heroRunning = false;
   }
+  let heroVisible = true, heroRunning = true;
   requestAnimationFrame(frame);
+  if ('IntersectionObserver' in window && !reduce) {
+    new IntersectionObserver(([e]) => {
+      heroVisible = e.isIntersecting;
+      if (heroVisible && !heroRunning) { heroRunning = true; requestAnimationFrame(frame); }
+    }).observe(cv);
+  }
 
-  /* ---------- the real payout clock (every 10 minutes) ---------- */
+  /* ---------- real payday clock ---------- */
   const cd = document.getElementById('countdown');
   function tick() {
-    const s = Math.floor(Date.now() / 1000), left = 600 - (s % 600);
+    const left = 600 - (Math.floor(Date.now() / 1000) % 600);
     cd.textContent = String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
-    document.getElementById('term-clock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
   tick(); setInterval(tick, 1000);
 
-  /* ---------- example heartbeat log ---------- */
-  const log = document.getElementById('log');
+  /* ---------- friendly example feed ---------- */
+  const feed = document.getElementById('feed');
   const bar = document.getElementById('unitbar'), ut = document.getElementById('unittext');
-  const node = '7L5oRrjc';
-  let seq = 41, units = 4;
-  function line(html) {
-    const d = document.createElement('div');
-    d.innerHTML = html;
-    log.appendChild(d);
-    while (log.children.length > 9) log.removeChild(log.firstChild);
+  let units = 6;
+  function add(icon, html) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="ic">${icon}</span><span>${html}</span>`;
+    feed.appendChild(li);
+    while (feed.children.length > 6) feed.removeChild(feed.firstChild);
   }
-  function hex(n) { let s = ''; for (let i = 0; i < n; i++) s += '0123456789abcdef'[Math.floor(Math.random() * 16)]; return s; }
-  function beat() {
-    seq += 1;
-    const ts = Math.floor(Date.now() / 1000);
-    line(`<span class="dim">sign</span> pulse-heartbeat:${node}…:${seq}:${ts}:1`);
-    line(`<span class="dim">sig&nbsp;</span> ${hex(24)}…`);
-    units = units >= 10 ? 1 : units + 1;
-    line(`<span class="ok">ok&nbsp;&nbsp;</span> counted · ${units} unit${units > 1 ? 's' : ''} this period${units === 10 ? ' · <span class="warn">+1 PLS</span>' : ''}`);
-    bar.style.width = (units * 10) + '%';
-    ut.textContent = units + ' of 10 units toward 1 PLS';
+  function checkin() {
+    units += 1;
+    add('📡', 'Phone checked in');
+    add('🖐', 'Fingerprint matched <span class="teal">✓</span>');
+    if (units >= 10) {
+      add('💎', '<b class="amber">+1 PLS</b> earned');
+      bar.style.width = '100%'; ut.textContent = '10 / 10 check-ins';
+      units = 0;
+      setTimeout(() => { bar.style.width = '0%'; ut.textContent = '0 / 10 check-ins'; }, 1200);
+    } else {
+      bar.style.width = (units * 10) + '%'; ut.textContent = units + ' / 10 check-ins';
+    }
   }
-  line('<span class="dim">node</span> handshake signed · session open');
-  beat();
-  if (!reduce) setInterval(beat, 3000);
+  add('⛏', 'You started mining. Phone is now a node.');
+  checkin();
+  if (!reduce) setInterval(checkin, 3000);
 
-  /* ---------- sections settle into place as they enter ---------- */
-  const io = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { threshold: .12 }) : null;
-  document.querySelectorAll('.rise').forEach(el => io ? io.observe(el) : el.classList.add('in'));
+  /* ---------- the strike mini-game ---------- */
+  const VEINS = [
+    { name: 'Coal Seam', hp: 12, speed: 0.55, perf: 0.07, good: 0.17, ore: 'coal' },
+    { name: 'Iron Vein', hp: 18, speed: 0.75, perf: 0.06, good: 0.15, ore: 'iron' },
+    { name: 'Pulse Crystal Grotto', hp: 26, speed: 0.95, perf: 0.05, good: 0.13, ore: 'crystal' },
+    { name: 'Void Rift', hp: 36, speed: 1.2, perf: 0.04, good: 0.11, ore: 'void shards' }
+  ];
+  const el = id => document.getElementById(id);
+  const track = el('track'), marker = el('marker'), zg = el('zgood'), zp = el('zperf');
+  const verdict = el('verdict'), hpbar = el('hpbar'), btn = el('strikeBtn');
+  let vi = 0, hp = VEINS[0].hp, pos = 0, dir = 1, last = performance.now(), locked = false, center = 0.5;
+  const score = { p: 0, g: 0, m: 0 };
+  function layout() {
+    const v = VEINS[vi];
+    center = 0.25 + Math.random() * 0.5;
+    zg.style.left = ((center - v.good) * 100) + '%'; zg.style.width = (v.good * 200) + '%';
+    zp.style.left = ((center - v.perf) * 100) + '%'; zp.style.width = (v.perf * 200) + '%';
+    el('vname').textContent = v.name; el('vlvl').textContent = `Vein ${vi + 1} of 4`;
+    hpbar.style.width = (hp / v.hp * 100) + '%';
+  }
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (!locked) {
+      pos += dir * VEINS[vi].speed * dt;
+      if (pos > 1) { pos = 1; dir = -1; } else if (pos < 0) { pos = 0; dir = 1; }
+      marker.style.left = (pos * 100) + '%';
+    }
+    requestAnimationFrame(loop);
+  }
+  function say(text, cls) { verdict.textContent = text; verdict.className = 'verdict ' + cls; }
+  function strike() {
+    if (locked) return;
+    const v = VEINS[vi], d = Math.abs(pos - center);
+    let dmg = 0;
+    if (d <= v.perf) { dmg = 4; score.p++; say('PERFECT!', 'perfect'); }
+    else if (d <= v.good) { dmg = 2; score.g++; say('Good hit', 'good'); }
+    else { score.m++; say('Miss…', 'miss'); }
+    el('tally').textContent = `Perfect ${score.p} · Good ${score.g} · Miss ${score.m}`;
+    if (dmg) { track.classList.remove('shake'); void track.offsetWidth; track.classList.add('shake'); }
+    hp = Math.max(0, hp - dmg);
+    hpbar.style.width = (hp / v.hp * 100) + '%';
+    if (hp === 0) {
+      locked = true;
+      const ore = 2 + score.p % 3;
+      say(`VEIN CLEARED! +${ore} ${v.ore}`, 'clear');
+      setTimeout(() => {
+        vi = (vi + 1) % VEINS.length; hp = VEINS[vi].hp; locked = false;
+        say(vi === 0 ? 'Back to the top. Again?' : 'Deeper. Faster. Go!', 'good');
+        layout();
+      }, 1500);
+    } else if (dmg) {
+      layout();
+    }
+  }
+  btn.addEventListener('click', strike);
+  track.addEventListener('pointerdown', e => { e.preventDefault(); strike(); });
+  layout();
+  requestAnimationFrame(loop);
+
+  /* ---------- sections settle in ---------- */
+  const io = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { threshold: .1 }) : null;
+  document.querySelectorAll('.rise').forEach(x => io ? io.observe(x) : x.classList.add('in'));
 })();
 </script>
 </body>
