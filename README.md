@@ -1,4 +1,77 @@
-# Pulse Network v4
+# Pulse Network v5
+
+**Download:** [PulseNetwork_v5.0.apk](https://shotgunsmiley.github.io/pulse/download/PulseNetwork_v5.0.apk) · **Website:** https://shotgunsmiley.github.io/pulse/
+
+## What's new in v5
+
+**Look and feel**
+- Chunky 2007-era pixel textures on every model (made in code, `gen/texgen.py`), laid on by a triplanar shader, so no UV maps are needed.
+- A real sky with drifting clouds and stars. Day and night follow your phone's clock.
+- Torches flicker, and the town crystal flares every time your phone's heartbeat is accepted.
+- Seasons: snow on the rooftops in winter, falling leaves in fall, petals in spring.
+- Animation: idle breathing, walk bob, a fast strike swing, a cheer when a vein breaks, a stumble on a miss, and 6 emotes.
+- Mining effects: rock chips, sparks, a bigger burst on a PERFECT, screen shake, veins that crack as they weaken, ore flying to your bag, and a streak flame on the pickaxe.
+- Townsfolk walk the plaza, birds circle overhead, trees sway, and the town has a new well, market stalls, barrels and benches.
+- Old-school stone and parchment menus.
+- Character creator: 6 faces (freckles, moustache, beards, a scar) and a new Lantern Trim.
+- Pets that follow you: Baby Golem, Cave Bat and Crystal Sprite. They are earned, never bought.
+- A fly-through intro on first launch.
+
+**Sound:** music for the town, mine and arena; ambience for caves, town, tavern and lake; different pickaxe pitch per vein; a payday chime with a coin shower. All of it is made in code (`gen/audiogen.py`).
+
+**New places and play**
+- *Cave Expeditions:* procedural floors. Every swing burns lamp oil; climb out with your haul or lose half in a collapse.
+- *Underground Lake fishing:* six fish, and faster reels catch rarer fish.
+- *Home cabin:* trophy shelves that friends can visit.
+- *Mining streaks:* up to x2 ore.
+- *Gems:* amber, garnet, sapphire and voidstone.
+- *Hidden veins:* announced in the Tavern.
+- *Weekend Deep Dive:* x1.5 ore and XP.
+
+**Competition**
+- *Strike-Off:* a 4th skill game, and a staked mining race.
+- *Best-of-3 series* and *double-or-nothing rematches*.
+- *King of the Hill:* a throne per game. The pot grows with every failed challenge; the king keeps 80% and 20% is burned.
+- *Ghost races:* against friends' or the top player's exact run.
+- *Bounties* on scores.
+- *Duel replays* with reactions.
+- *Crew territory:* last week's top crew holds a seam for +20% ore.
+- *Season champion* rewards.
+
+**Economy:** an auction house for ore, gems and fish, and 24-hour gear rental. 5% of every sale or rental is burned.
+
+**Network**
+- In-game network screen (tap the town crystal): phones online by time zone, paydays, burn totals, and whether the ledger balances.
+- One-tap wallet link: sign a message in Phantom or Solflare, with no copy-paste.
+- On-chain reward history with explorer links.
+
+**Growth**
+- Guided first 5 minutes with Old Garrick.
+- Invite codes (both players get Lantern Trim at level 5).
+- Mentors.
+- Share-card links.
+- Offline practice for skill games.
+
+**Safety and economy rules kept:** new PLS still comes **only** from phone-node time while mining, plus the one-time starter grant. Nothing new mints PLS: streaks, gems, events, expeditions and fishing pay ore, gems, fish, XP, badges and pets.
+
+**Anti-cheat v2:** reaction times are profiled across games. Faster-than-human or machine-steady play pauses *staked* games until an admin clears it (`/admin/anticheat`).
+
+**Tests:**
+- `test_v5.py`: 26 checks plus real HTTP.
+- `sim_economy.py`: 300 bots over 30 days. The ledger balances every day, no player goes over the daily cap, and about 40% of minted PLS is burned.
+- The v4 suites still pass.
+
+**Still needs the owner**
+- A free Postgres database (Neon/Supabase), with its address set as `DATABASE_URL` on Render.
+- The final token supply numbers.
+- A Google Play account, for the listing and Play Integrity.
+- A legal review before any real money or mainnet.
+
+**App source** is in `app/` (Godot 4.7, GL Compatibility). The generators are in `gen/`; rerun them to rebuild models, textures and audio.
+
+---
+
+# Pulse Network v4 (reference)
 
 A 3D mining and wagering game for Android. You mine **PLS** (Pulse) by playing, then stake it in skill duels, tournaments and luck games.
 

@@ -2552,7 +2552,8 @@ def profile_view(u, full=True):
     if full:
         out.update({'gems': u['gems'], 'pets': u['pets'], 'streak': u['streak'], 'best_streak': u['best_streak'],
                     'deepest': u['deepest'], 'tutorial': u['tutorial'], 'invite_code': u['username'].lower(),
-                    'ac_hold': u['ac']['flag'], 'fish_total': sum(u['fish'].values())})
+                    'ac_hold': u['ac']['flag'], 'fish_total': sum(u['fish'].values()), 'fish': u['fish'],
+                    'badges': badges_view(u)})
     return out
 
 _v4_h_me = h_me
