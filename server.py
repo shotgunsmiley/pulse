@@ -1,4 +1,4 @@
-# Pulse Network Server v4.2 - Python standard library only (psycopg2 optional for Postgres)
+# Pulse Network Server v5.0 - Python standard library only (psycopg2 optional for Postgres)
 # Game API for the Pulse v4 Godot client.
 # PLS is an in-game, non-redeemable game balance: it can only be mined in game.
 # v4.1: phones register as nodes (signed handshake + heartbeats); node contribution is rewarded
@@ -8,7 +8,7 @@ import os, json, hashlib, hmac, time, random, uuid, datetime, threading, secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = 4.2
+VERSION = 5.0
 DATA_FILE = os.environ.get('PULSE_DATA_FILE', 'pulse_v4_data.json')
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 SESSION_DAYS = 30
@@ -2387,6 +2387,1436 @@ def h_sol_mine(u, q):
 GET_PUBLIC.update({'/solana/status': h_sol_status})
 GET_AUTH.update({'/solana/mine': h_sol_mine})
 POST_AUTH.update({'/solana/wallet': h_sol_wallet})
+
+# ===========================================================================
+# PULSE v5 - new systems, hooked onto the v4 server.
+#   Rule kept from v4.2: new PLS is only created by phone-node time. Nothing in
+#   this file mints PLS. Streaks, gems, events, expeditions and fishing pay in
+#   ore, gems, fish, XP, badges and pets. PLS only moves between players, into
+#   escrow/pots, or into the burn account.
+# ===========================================================================
+VERSION = 5.0
+V5 = {'last_tick': 0.0}
+FOUNDING_UNTIL = float(os.environ.get('PULSE_FOUNDING_UNTIL', '1798761600'))   # 2027-01-01 UTC
+MARKET_FEE = 0.05          # burned on every auction-house sale and rental
+KOTH_ENTRY = 10
+KOTH_KEEP = 0.80           # dethroned king keeps 80% of the pot, 20% burned
+BOUNTY_DAYS = 7
+GEMS = {1: 'amber', 2: 'garnet', 3: 'sapphire', 4: 'voidstone'}
+GEM_NAMES = list(GEMS.values())
+for _k, _v in {'hidden': {}, 'koth': {}, 'bounties': [], 'market': [], 'rentals': [], 'series': {}, 'shares': {},
+               'territory': {}, 'season_awards': {}, 'wallet_links': {}, 'reactions': {}, 'ghosts': {}}.items():
+    DB.setdefault(_k, _v)
+
+GAMES.append('strikeoff')                     # the mining race: a staked mining duel
+for _s in (20, 200, 500):                      # doubles for double-or-nothing rematches
+    if _s not in STAKES:
+        STAKES.append(_s)
+STAKES.sort()
+APPEARANCE_RANGES.update({'accent': 5, 'face': 6})
+FREE_OPTIONS.update({'face': {0, 1, 2, 3}})
+SHOP.extend([
+    {'id': 'face_4', 'slot': 'face', 'value': 4, 'name': 'Scarred Veteran', 'price': 90},
+    {'id': 'face_5', 'slot': 'face', 'value': 5, 'name': 'Grand Beard', 'price': 140},
+])
+SHOP_BY_ID.update({s['id']: s for s in SHOP})
+
+def _v5_defaults():
+    return {'gems': {g: 0 for g in GEM_NAMES}, 'fish': {}, 'fish_best': {}, 'pets': [], 'pet': '', 'badges': {},
+            'streak': 0, 'best_streak': 0, 'deepest': 0, 'expedition': None, 'cabin': [], 'stash': {},
+            'invited_by': '', 'invite_done': False, 'mentor': '', 'mentor_done': False, 'tutorial': False,
+            'activity': {'what': 'town', 't': 0}, 'ac': {'rt': [], 'flag': False, 'why': ''}, 'best_runs': {},
+            'fishing': None, 'node_tz': None}
+
+_v4_user_fix = user_fix
+def user_fix(u):
+    _v4_user_fix(u)
+    for k, v in _v5_defaults().items():
+        if k not in u:
+            u[k] = v
+    for g in GEM_NAMES:
+        u['gems'].setdefault(g, 0)
+    u['appearance'].setdefault('face', 0)
+    return u
+
+for _u in DB['users'].values():
+    user_fix(_u)
+
+def act(u, what):
+    u['activity'] = {'what': what, 't': now()}
+
+def is_weekend():
+    return datetime.datetime.utcnow().weekday() >= 5
+
+def sys_msg(text):
+    DB['messages'].append({'id': next_id('x'), 'channel': 'lobby', 'from': 'Pulse', 'level': 0, 'crew': '', 'text': text,
+                           't': now(), 'system': True})
+    DB['messages'] = DB['messages'][-3000:]
+
+# ---------------------------------------------------------------------------
+# BADGES
+# ---------------------------------------------------------------------------
+def _node_hours(u):
+    return sum(n.get('units_total', 0) for n in DB['nodes'].values() if n['uid'] == u['uid']) * HB_INTERVAL / 3600.0
+
+def _node_days(u):
+    return len({time.strftime('%Y-%m-%d', time.gmtime(r['t'])) for r in DB['node_rewards'] if r['uid'] == u['uid'] and r['pls'] > 0})
+
+BADGES = [
+    ('founding', 'Founding Miner', 'Joined Pulse during testing', lambda u: u['created'] < FOUNDING_UNTIL),
+    ('first_vein', 'First Crack', 'Cleared your first vein', lambda u: u['lifetime_blocks'] >= 1),
+    ('veins_100', 'Seasoned Miner', 'Cleared 100 veins', lambda u: u['lifetime_blocks'] >= 100),
+    ('veins_1000', 'Mountain Mover', 'Cleared 1,000 veins', lambda u: u['lifetime_blocks'] >= 1000),
+    ('streak_10', 'On Fire', 'Landed 10 perfect strikes in a row', lambda u: u['best_streak'] >= 10),
+    ('streak_25', 'Inferno', 'Landed 25 perfect strikes in a row', lambda u: u['best_streak'] >= 25),
+    ('node_1h', 'Node Online', '1 hour as a network node', lambda u: _node_hours(u) >= 1),
+    ('node_10h', 'Node Veteran', '10 hours as a network node', lambda u: _node_hours(u) >= 10),
+    ('node_100h', 'Backbone', '100 hours as a network node', lambda u: _node_hours(u) >= 100),
+    ('gem_first', 'Glitter', 'Found your first gem', lambda u: sum(u['gems'].values()) >= 1 or bool(u['badges'].get('gem_first'))),
+    ('duel_1', 'First Blood', 'Won a duel', lambda u: u['wins'] >= 1),
+    ('duel_25', 'Duelist', 'Won 25 duels', lambda u: u['wins'] >= 25),
+    ('angler', 'Angler', 'Caught 10 fish', lambda u: sum(u['fish'].values()) >= 10),
+    ('deep_8', 'Deep Diver', 'Reached floor 8 on an expedition', lambda u: u['deepest'] >= 8),
+    ('deep_15', 'Abyss Walker', 'Reached floor 15 on an expedition', lambda u: u['deepest'] >= 15),
+]
+BADGE_INFO = {b[0]: {'name': b[1], 'desc': b[2]} for b in BADGES}
+BADGE_INFO.update({'king': {'name': 'King of the Hill', 'desc': 'Held a throne'},
+                   'bounty': {'name': 'Bounty Hunter', 'desc': 'Claimed a bounty'},
+                   'mentor': {'name': 'Mentor', 'desc': 'Helped a new miner reach level 10'},
+                   'recruiter': {'name': 'Recruiter', 'desc': 'Invited a friend who reached level 5'},
+                   'season_top': {'name': 'Season Champion', 'desc': 'Finished a season in the top 10'},
+                   'crew_land': {'name': 'Landholder', 'desc': 'Your crew held a vein for a week'}})
+
+def give_badge(u, bid):
+    if bid not in u['badges']:
+        u['badges'][bid] = int(now())
+        return True
+    return False
+
+PETS = {'golem': ('Baby Golem', 'Clear 100 veins', lambda u: u['lifetime_blocks'] >= 100),
+        'bat': ('Cave Bat', 'Reach floor 8 on an expedition', lambda u: u['deepest'] >= 8),
+        'sprite': ('Crystal Sprite', 'Earn node rewards on 7 different days', lambda u: _node_days(u) >= 7)}
+
+def check_badges(u):
+    new = []
+    for bid, name, desc, test in BADGES:
+        if bid not in u['badges'] and test(u):
+            give_badge(u, bid)
+            new.append(bid)
+    for pid, (name, how, test) in PETS.items():
+        if pid not in u['pets'] and test(u):
+            u['pets'].append(pid)
+            new.append('pet:' + pid)
+    lvl = level_for(u['xp'])
+    inviter = DB['users'].get(u.get('invited_by') or '')
+    if inviter:
+        user_fix(inviter)
+    if inviter and not u['invite_done'] and lvl >= 5:
+        u['invite_done'] = True
+        for x in (u, inviter):
+            if 'accent_4' not in x['cosmetics']:
+                x['cosmetics'].append('accent_4')
+        give_badge(inviter, 'recruiter')
+        new.append('invite_reward')
+    mentor = DB['users'].get(u.get('mentor') or '')
+    if mentor and not u['mentor_done'] and lvl >= 10:
+        user_fix(mentor)
+        u['mentor_done'] = True
+        give_badge(mentor, 'mentor')
+        mentor['gems']['sapphire'] += 2
+    return new
+
+def badges_view(u):
+    return [dict(id=k, earned=v, **BADGE_INFO.get(k, {'name': k, 'desc': ''})) for k, v in sorted(u['badges'].items(), key=lambda x: x[1])]
+
+def h_badges(u, q):
+    new = check_badges(u)
+    save()
+    return {'ok': True, 'badges': badges_view(u), 'all': [dict(id=k, **v) for k, v in BADGE_INFO.items()], 'new': new,
+            'pets': u['pets'], 'pet': u['pet'], 'pet_info': {k: {'name': v[0], 'how': v[1]} for k, v in PETS.items()}}
+
+def h_pet(u, b):
+    p = str(b.get('pet', ''))
+    if p and p not in u['pets']:
+        raise ApiError('not_earned', 'Earn that pet first.')
+    u['pet'] = p
+    save()
+    return {'ok': True, 'pet': p}
+
+_v4_profile_view = profile_view
+def profile_view(u, full=True):
+    user_fix(u)
+    out = _v4_profile_view(u, full)
+    out.update({'pet': u.get('pet', ''), 'badge_count': len(u.get('badges', {})),
+                'founding': 'founding' in u.get('badges', {})})
+    if full:
+        out.update({'gems': u['gems'], 'pets': u['pets'], 'streak': u['streak'], 'best_streak': u['best_streak'],
+                    'deepest': u['deepest'], 'tutorial': u['tutorial'], 'invite_code': u['username'].lower(),
+                    'ac_hold': u['ac']['flag'], 'fish_total': sum(u['fish'].values())})
+    return out
+
+_v4_h_me = h_me
+def h_me(u, q):
+    out = _v4_h_me(u, q)
+    out['new_badges'] = check_badges(u)
+    out['profile'] = profile_view(u)
+    out['events'] = events_view()
+    save()
+    return out
+
+def h_flags(u, b):
+    if 'tutorial' in b:
+        u['tutorial'] = bool(b['tutorial'])
+    save()
+    return {'ok': True, 'tutorial': u['tutorial']}
+
+# ---------------------------------------------------------------------------
+# REGISTRATION: invites + founding badge
+# ---------------------------------------------------------------------------
+_v4_h_register = h_register
+def h_register(b, ip):
+    out = _v4_h_register(b, ip)
+    uid = DB['names'].get(str(b.get('username', '')).strip().lower())
+    u = user_fix(DB['users'][uid])
+    inv = DB['names'].get(str(b.get('invite', '')).strip().lower())
+    if inv and inv != uid:
+        u['invited_by'] = inv
+    check_badges(u)
+    save()
+    out['profile'] = profile_view(u)
+    return out
+
+def h_mentor(u, b):
+    m = DB['names'].get(str(b.get('username', '')).strip().lower())
+    if not m or m == u['uid']:
+        raise ApiError('player_not_found', 'No player with that name.')
+    if level_for(u['xp']) >= 5:
+        raise ApiError('too_experienced', 'Mentors are for miners under level 5.')
+    if level_for(DB['users'][m]['xp']) < 15:
+        raise ApiError('mentor_too_new', 'A mentor needs to be level 15 or higher.')
+    u['mentor'] = m
+    save()
+    return {'ok': True, 'mentor': DB['users'][m]['username']}
+
+# ---------------------------------------------------------------------------
+# EVENTS: Weekend Deep Dive, hidden veins, seasons
+# ---------------------------------------------------------------------------
+def events_view():
+    h = DB['hidden']
+    hidden = None
+    if h.get('until', 0) > now():
+        t = TIERS[h['tier'] - 1]
+        hidden = {'tier': h['tier'], 'name': t['name'], 'ends_in': int(h['until'] - now()), 'kind': h.get('kind', 'glitter')}
+    mon = datetime.datetime.utcnow().month
+    season = 'winter' if mon in (12, 1, 2) else 'spring' if mon in (3, 4, 5) else 'summer' if mon in (6, 7, 8) else 'fall'
+    return {'deep_dive': is_weekend(), 'hidden_vein': hidden, 'season': season,
+            'ore_mult': 1.5 if is_weekend() else 1.0, 'xp_mult': 1.5 if is_weekend() else 1.0}
+
+def tick_hidden():
+    h = DB['hidden']
+    if h.get('next', 0) == 0:
+        h['next'] = now() + random.uniform(600, 1800)
+    if now() >= h['next'] and h.get('until', 0) < now():
+        tier = random.choice([1, 1, 2, 2, 3, 4])
+        winter = events_view()['season'] == 'winter'
+        h.update({'tier': tier, 'until': now() + 300, 'kind': 'frost' if winter and random.random() < 0.5 else 'glitter'})
+        gap = (900, 1800) if is_weekend() else (1800, 3600)
+        h['next'] = now() + random.uniform(*gap)
+        label = 'A frost geode' if h['kind'] == 'frost' else 'A glittering vein'
+        sys_msg('%s just broke through in the %s! Double ore and triple gem luck for 5 minutes.' % (label, TIERS[tier - 1]['name']))
+        save()
+
+def tick_seasons():
+    cur = season_key()
+    last = DB['season_awards'].get('_current')
+    if last is None:
+        DB['season_awards']['_current'] = cur
+        return
+    if last == cur:
+        return
+    DB['season_awards']['_current'] = cur
+    winners = []
+    for g in GAMES:
+        rows = sorted([x for x in DB['users'].values() if x.get('wins', 0) + x.get('losses', 0) + x.get('draws', 0) > 0],
+                      key=lambda x: -x['elo'].get(g, 1200))[:10]
+        for x in rows:
+            user_fix(x)
+            give_badge(x, 'season_top')
+            x['gems']['voidstone'] += 1
+            winners.append(x['username'])
+    DB['season_awards'][last] = sorted(set(winners))
+    if winners:
+        sys_msg('Season %s is over! %d champions earned the Season Champion badge.' % (last, len(set(winners))))
+    save()
+
+# ---------------------------------------------------------------------------
+# MINING: streaks, gems, hidden veins, weekend bonus, crew territory, anti-cheat
+# ---------------------------------------------------------------------------
+def territory_holder(tier, wk=None):
+    """The crew that cleared the most veins on this tier LAST week holds it this week."""
+    wk = wk or week_key()
+    prev = (datetime.datetime.utcnow() - datetime.timedelta(days=7))
+    pk = '%d-W%02d' % prev.isocalendar()[:2]
+    board = DB['territory'].get(pk, {}).get(str(tier), {})
+    if not board:
+        return None
+    cid = max(board, key=lambda k: board[k])
+    return cid if cid in DB['crews'] else None
+
+def h_territory(u, q):
+    wk = week_key()
+    out = []
+    for t in TIERS:
+        live = DB['territory'].get(wk, {}).get(str(t['id']), {})
+        holder = territory_holder(t['id'])
+        top = sorted(live.items(), key=lambda kv: -kv[1])[:5]
+        out.append({'tier': t['id'], 'vein': t['name'], 'holder': DB['crews'][holder]['name'] if holder else None,
+                    'holder_tag': DB['crews'][holder]['tag'] if holder else None,
+                    'race': [{'crew': DB['crews'][c]['name'], 'tag': DB['crews'][c]['tag'], 'veins': n} for c, n in top if c in DB['crews']]})
+    return {'ok': True, 'week': wk, 'veins': out, 'bonus': '+20% ore for the holding crew'}
+
+_v4_h_mine_start = h_mine_start
+def h_mine_start(u, b):
+    out = _v4_h_mine_start(u, b)
+    act(u, 'mine')
+    out['events'] = events_view()
+    out['streak'] = u['streak']
+    return out
+
+_v4_h_mine_strike = h_mine_strike
+def h_mine_strike(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    tier = c['challenge']['tier'] if c and c['uid'] == u['uid'] else 1
+    out = _v4_h_mine_strike(u, b)
+    q = out['quality']
+    act(u, 'mine')
+    # streak + combo multiplier
+    if q == 'perfect':
+        u['streak'] += 1
+        u['best_streak'] = max(u['best_streak'], u['streak'])
+    elif q == 'miss':
+        u['streak'] = 0
+    combo = 1.0 + min(1.0, (u['streak'] // 5) * 0.25)      # +25% per 5 perfects, up to x2
+    mult = combo
+    ev = events_view()
+    hidden = ev['hidden_vein'] and ev['hidden_vein']['tier'] == tier
+    if hidden:
+        mult *= 2
+    mult *= ev['ore_mult']
+    holder = territory_holder(tier)
+    if holder and u.get('crew') == holder:
+        mult *= 1.2
+    bonus_ore = int(out['ore_gained'] * mult) - out['ore_gained']
+    if bonus_ore > 0:
+        u['ore'][out['ore']] += bonus_ore
+    bonus_xp = int(round(out['ore_gained'] * (ev['xp_mult'] - 1) * 2))
+    if bonus_xp > 0:
+        u['xp'] += bonus_xp
+    # gems
+    gem = None
+    chance = {'perfect': 0.04, 'great': 0.015}.get(q, 0) * (3 if hidden else 1) * (1.5 if ev['deep_dive'] else 1)
+    if chance and random.random() < chance:
+        gem = GEMS[tier]
+        u['gems'][gem] += 1
+    # crew territory race
+    if out['cleared'] and u.get('crew'):
+        wk = week_key()
+        b2 = DB['territory'].setdefault(wk, {}).setdefault(str(tier), {})
+        b2[u['crew']] = b2.get(u['crew'], 0) + 1
+        for k in sorted(DB['territory'])[:-3]:
+            DB['territory'].pop(k, None)
+    out.update({'streak': u['streak'], 'best_streak': u['best_streak'], 'combo': combo, 'bonus_ore': max(0, bonus_ore),
+                'gem': gem, 'hidden': bool(hidden), 'ore_inv': u['ore'], 'gems': u['gems'], 'xp': u['xp'],
+                'level': level_for(u['xp']), 'new_badges': check_badges(u)})
+    save()
+    return out
+
+# ---------------------------------------------------------------------------
+# ANTI-CHEAT v2: reaction-time profile across skill games
+# ---------------------------------------------------------------------------
+AC_MIN_SAMPLES = 30
+
+def ac_record(u, game, result):
+    rts = []
+    if isinstance(result, dict):
+        if game == 'quickdraw':
+            rts = [to_int(x, -1) for x in (result.get('reactions') or []) if to_int(x, -1) > 0]
+        elif game == 'sniper':
+            rts = [to_int(h.get('rt'), -1) for h in (result.get('hits') or []) if isinstance(h, dict) and h.get('hit') is True]
+    rts = [r for r in rts if r > 0]
+    if not rts:
+        return
+    ac = u['ac']
+    ac['rt'] = (ac['rt'] + rts)[-120:]
+    s = ac['rt']
+    if len(s) >= AC_MIN_SAMPLES and not ac['flag']:
+        mean = sum(s) / len(s)
+        sd = (sum((x - mean) ** 2 for x in s) / len(s)) ** 0.5
+        if mean < 165:
+            ac['flag'], ac['why'] = True, 'average reaction %.0f ms is faster than human' % mean
+        elif sd < 12:
+            ac['flag'], ac['why'] = True, 'reaction times are machine-steady (spread %.1f ms)' % sd
+
+def ac_block(u, stake):
+    if u['ac']['flag'] and stake > 0:
+        raise ApiError('review_hold', 'Your recent results are being reviewed, so staked games are paused for now.')
+
+_v4_check_stake = check_stake
+def check_stake(u, game, stake):
+    s = _v4_check_stake(u, game, stake)
+    ac_block(u, s)
+    return s
+
+def h_admin_ac(q):
+    clear = (q.get('clear') or [''])[0]
+    if clear and clear in DB['users']:
+        DB['users'][clear]['ac'] = {'rt': [], 'flag': False, 'why': ''}
+        save()
+    flagged = [{'uid': x['uid'], 'username': x['username'], 'why': x.get('ac', {}).get('why', '')}
+               for x in DB['users'].values() if x.get('ac', {}).get('flag')]
+    return {'ok': True, 'flagged': flagged}
+
+# ---------------------------------------------------------------------------
+# SKILL GAMES: Strike-Off (mining race) + ghost runs
+# ---------------------------------------------------------------------------
+SO_STRIKES = 10
+SO_POINTS = {'perfect': 100, 'great': 70, 'good': 40, 'miss': 0}
+
+_v4_make_challenge = make_challenge
+def make_challenge(game, seed):
+    if game != 'strikeoff':
+        return _v4_make_challenge(game, seed)
+    rng = random.Random(seed)
+    strikes = []
+    for i in range(SO_STRIKES):
+        zone = round(0.22 - i * 0.01, 4)
+        strikes.append({'speed': round(0.6 + i * 0.07, 4), 'offset': round(rng.random(), 4),
+                        'zone_center': round(rng.uniform(zone / 2 + 0.05, 1 - zone / 2 - 0.05), 4), 'zone_width': zone})
+    return {'game': game, 'strikes': strikes, 'limit_ms': 6000}
+
+def so_quality(s, tap):
+    d = abs(marker_pos(s, tap) - s['zone_center'])
+    half = s['zone_width'] / 2
+    return 'perfect' if d <= half * 0.3 else 'great' if d <= half * 0.65 else 'good' if d <= half else 'miss'
+
+_v4_score_result = score_result
+def score_result(ch, result, elapsed_ms):
+    if ch['game'] != 'strikeoff':
+        return _v4_score_result(ch, result, elapsed_ms)
+    taps = result.get('taps') if isinstance(result, dict) else None
+    if not isinstance(taps, list) or len(taps) != len(ch['strikes']):
+        raise ApiError('bad_result')
+    pts, used, qs = 0, 0, []
+    for s, tap in zip(ch['strikes'], taps):
+        tap = to_int(tap, -1)
+        if tap < 150 or tap > ch['limit_ms']:
+            raise ApiError('impossible_reaction', 'That strike timing is not possible.')
+        q = so_quality(s, tap)
+        qs.append(q)
+        pts += SO_POINTS[q]
+        used += tap
+    if elapsed_ms + 600 < used:
+        raise ApiError('too_fast', 'Result arrived faster than the strikes can be played.')
+    score = pts * 10 + max(0, 99 - used // 1000)
+    return score, '%d perfect, %d great, %d good, %d miss' % tuple(qs.count(x) for x in ('perfect', 'great', 'good', 'miss'))
+
+_v4_new_challenge = new_challenge
+def new_challenge(u, game, mode, extra=None):
+    if game not in GAMES:
+        raise ApiError('bad_game')
+    seed = secrets.randbits(48)
+    cid = 'c' + secrets.token_hex(6)
+    ch = make_challenge(game, seed)
+    ex = dict(extra or {})
+    ex['seed'] = seed
+    CHALLENGES[cid] = {'uid': u['uid'], 'mode': mode, 'game': game, 'challenge': ch, 'issued': now(), 'extra': ex}
+    for k in [k for k, v in CHALLENGES.items() if now() - v['issued'] > 900]:
+        del CHALLENGES[k]
+    return cid, ch
+
+def keep_ghost(u, game, seed, result, score):
+    br = u['best_runs'].get(game)
+    if seed is None or (br and br['score'] >= score):
+        return
+    u['best_runs'][game] = {'seed': seed, 'result': result, 'score': score, 't': now()}
+    top = DB['ghosts'].get(game)
+    if not top or score > top['score']:
+        DB['ghosts'][game] = {'uid': u['uid'], 'score': score}
+
+_v4_h_practice_start = h_practice_start
+def h_practice_start(u, b):
+    act(u, 'arena')
+    return _v4_h_practice_start(u, b)
+
+def h_practice_submit(u, b):
+    c, elapsed = take_challenge(u, b.get('id'), 'practice')
+    score, detail = score_result(c['challenge'], b.get('result'), elapsed)
+    ac_record(u, c['game'], b.get('result'))
+    new_best = record_best(u, c['game'], score)
+    keep_ghost(u, c['game'], c['extra'].get('seed'), b.get('result'), score)
+    bump(u, 'skill')
+    claimed = claim_bounties(u, c['game'], score)
+    save()
+    return {'ok': True, 'game': c['game'], 'score': score, 'detail': detail, 'best': u['best'][c['game']], 'new_best': new_best,
+            'bounties_claimed': claimed}
+
+_v4_h_pvp_submit = h_pvp_submit
+def h_pvp_submit(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    game = c['game'] if c else ''
+    mid = c['extra'].get('match') if c else None
+    out = _v4_h_pvp_submit(u, b)
+    ac_record(u, game, b.get('result'))
+    m = DB['matches'].get(mid)
+    if m and u['uid'] in m['subs']:
+        m['subs'][u['uid']]['replay'] = b.get('result')
+    save()
+    return out
+
+def h_ghosts(u, q):
+    game = (q.get('game') or ['quickdraw'])[0]
+    if game not in GAMES:
+        raise ApiError('bad_game')
+    rows = []
+    top = DB['ghosts'].get(game)
+    if top and top['uid'] in DB['users']:
+        rows.append({'username': DB['users'][top['uid']]['username'], 'score': top['score'], 'why': 'Top player'})
+    for fid in friends_of(u['uid']):
+        f = DB['users'].get(fid)
+        if f and f.get('best_runs', {}).get(game):
+            rows.append({'username': f['username'], 'score': f['best_runs'][game]['score'], 'why': 'Friend'})
+    mine = u['best_runs'].get(game)
+    if mine:
+        rows.append({'username': u['username'], 'score': mine['score'], 'why': 'Your best'})
+    return {'ok': True, 'game': game, 'ghosts': rows}
+
+def h_ghost_start(u, b):
+    game = b.get('game')
+    of = DB['names'].get(str(b.get('username', '')).strip().lower())
+    run = DB['users'][of].get('best_runs', {}).get(game) if of else None
+    if not run:
+        raise ApiError('no_ghost', 'That player has no saved run for this game.')
+    ch = make_challenge(game, run['seed'])
+    cid = 'c' + secrets.token_hex(6)
+    CHALLENGES[cid] = {'uid': u['uid'], 'mode': 'ghost', 'game': game, 'challenge': ch, 'issued': now(),
+                       'extra': {'ghost_uid': of, 'seed': run['seed']}}
+    act(u, 'arena')
+    return {'ok': True, 'id': cid, 'challenge': ch, 'ghost': {'username': DB['users'][of]['username'], 'score': run['score'],
+                                                              'result': run['result']}}
+
+def h_ghost_submit(u, b):
+    c, elapsed = take_challenge(u, b.get('id'), 'ghost')
+    score, detail = score_result(c['challenge'], b.get('result'), elapsed)
+    ac_record(u, c['game'], b.get('result'))
+    g = DB['users'][c['extra']['ghost_uid']]['best_runs'][c['game']]
+    bump(u, 'skill')
+    save()
+    return {'ok': True, 'score': score, 'detail': detail, 'ghost_score': g['score'], 'won': score > g['score'],
+            'ghost_name': DB['users'][c['extra']['ghost_uid']]['username']}
+
+# ---------------------------------------------------------------------------
+# BOUNTIES
+# ---------------------------------------------------------------------------
+def h_bounties(u, q):
+    rows = [{'id': x['id'], 'game': x['game'], 'target': x['target'], 'amount': x['amount'], 'by': DB['users'][x['by']]['username'],
+             'ends_in': int(x['until'] - now()), 'mine': x['by'] == u['uid']} for x in DB['bounties'] if x['state'] == 'open']
+    return {'ok': True, 'bounties': rows}
+
+def h_bounty_post(u, b):
+    game = b.get('game')
+    if game not in GAMES:
+        raise ApiError('bad_game')
+    amt = to_int(b.get('amount'), 0)
+    if amt < 10 or amt > 1000:
+        raise ApiError('bad_amount', 'Bounties are 10 to 1000 PLS.')
+    best = u['best'].get(game)
+    if best is None:
+        raise ApiError('no_score', 'Set a score in practice first. Your best score becomes the target.')
+    if sum(1 for x in DB['bounties'] if x['by'] == u['uid'] and x['state'] == 'open') >= 3:
+        raise ApiError('too_many', 'You can have 3 open bounties at a time.')
+    move(U(u['uid']), 'escrow', amt, 'bounty_post', game)
+    x = {'id': next_id('b'), 'by': u['uid'], 'game': game, 'target': best, 'amount': amt, 'until': now() + BOUNTY_DAYS * 86400, 'state': 'open'}
+    DB['bounties'].append(x)
+    sys_msg('%s put a %d PLS bounty on their %s score (%d). Beat it in practice to claim it!' % (u['username'], amt, game, best))
+    save()
+    return {'ok': True, 'bounty': x['id']}
+
+def claim_bounties(u, game, score):
+    got = []
+    if u['ac']['flag']:
+        return got
+    for x in DB['bounties']:
+        if x['state'] == 'open' and x['game'] == game and x['by'] != u['uid'] and score > x['target'] and x['until'] > now():
+            fee = int(x['amount'] * MARKET_FEE)
+            move('escrow', U(u['uid']), x['amount'] - fee, 'bounty_claim', x['id'])
+            move('escrow', 'burn', fee, 'bounty_fee', x['id'])
+            x['state'], x['winner'] = 'claimed', u['uid']
+            give_badge(u, 'bounty')
+            got.append({'id': x['id'], 'amount': x['amount'] - fee, 'by': DB['users'][x['by']]['username']})
+    return got
+
+def tick_bounties():
+    for x in DB['bounties']:
+        if x['state'] == 'open' and x['until'] < now():
+            move('escrow', U(x['by']), x['amount'], 'bounty_refund', x['id'])
+            x['state'] = 'expired'
+    DB['bounties'] = [x for x in DB['bounties'] if x['state'] == 'open' or x['until'] > now() - 7 * 86400][-500:]
+
+# ---------------------------------------------------------------------------
+# KING OF THE HILL (one throne per skill game)
+# ---------------------------------------------------------------------------
+def koth_view(g):
+    k = DB['koth'].get(g)
+    if not k:
+        return {'game': g, 'king': None, 'score': None, 'pot': 0, 'entry': KOTH_ENTRY}
+    return {'game': g, 'king': DB['users'][k['uid']]['username'], 'score': k['score'], 'pot': k['pot'],
+            'since': int(now() - k['since']), 'entry': KOTH_ENTRY, 'defenses': k.get('defenses', 0)}
+
+def h_koth(u, q):
+    return {'ok': True, 'thrones': [koth_view(g) for g in GAMES], 'keep': KOTH_KEEP}
+
+def h_koth_challenge(u, b):
+    game = b.get('game')
+    if game not in GAMES:
+        raise ApiError('bad_game')
+    ac_block(u, KOTH_ENTRY)
+    k = DB['koth'].get(game)
+    if k and k['uid'] == u['uid']:
+        raise ApiError('already_king', 'You already hold this throne.')
+    if k:
+        move(U(u['uid']), 'pots', KOTH_ENTRY, 'koth_entry', game)
+        k['pot'] += KOTH_ENTRY
+    cid, ch = new_challenge(u, game, 'koth')
+    act(u, 'arena')
+    save()
+    return {'ok': True, 'id': cid, 'challenge': ch, 'throne': koth_view(game)}
+
+def h_koth_submit(u, b):
+    c, elapsed = take_challenge(u, b.get('id'), 'koth')
+    score, detail = score_result(c['challenge'], b.get('result'), elapsed)
+    ac_record(u, c['game'], b.get('result'))
+    g = c['game']
+    k = DB['koth'].get(g)
+    crowned = False
+    if not k:
+        DB['koth'][g] = {'uid': u['uid'], 'score': score, 'pot': 0, 'since': now(), 'defenses': 0}
+        crowned = True
+    elif score > k['score']:
+        old = DB['users'][k['uid']]
+        keep = int(k['pot'] * KOTH_KEEP)
+        if keep:
+            move('pots', U(old['uid']), keep, 'koth_reign', g)
+        if k['pot'] - keep:
+            move('pots', 'burn', k['pot'] - keep, 'koth_burn', g)
+        DB['koth'][g] = {'uid': u['uid'], 'score': score, 'pot': 0, 'since': now(), 'defenses': 0}
+        sys_msg('%s took the %s throne from %s with %d points!' % (u['username'], g, old['username'], score))
+        crowned = True
+    else:
+        k['defenses'] = k.get('defenses', 0) + 1
+    if crowned:
+        give_badge(u, 'king')
+    bump(u, 'skill')
+    save()
+    return {'ok': True, 'score': score, 'detail': detail, 'crowned': crowned, 'throne': koth_view(g)}
+
+# ---------------------------------------------------------------------------
+# BEST-OF-3 SERIES + DOUBLE-OR-NOTHING REMATCH
+# ---------------------------------------------------------------------------
+def series_view(s, uid):
+    opp = [p for p in s['players'] if p != uid][0]
+    return {'id': s['id'], 'game': s['game'], 'stake': s['stake'], 'state': s['state'], 'opponent': DB['users'][opp]['username'],
+            'wins': {DB['users'][p]['username']: s['wins'][p] for p in s['players']}, 'games': len(s['matches']),
+            'current_match': s['matches'][-1] if s['state'] == 'active' and s['matches'] else None, 'winner': s.get('winner')}
+
+def h_series_challenge(u, b):
+    game = b.get('game')
+    stake = check_stake(u, game, b.get('stake'))
+    to = DB['names'].get(str(b.get('username', '')).strip().lower())
+    if not to or to == u['uid']:
+        raise ApiError('player_not_found', 'No player with that name.')
+    move(U(u['uid']), 'escrow', stake, 'series_stake', game)
+    sid = next_id('s')
+    DB['series'][sid] = {'id': sid, 'game': game, 'stake': stake, 'players': [u['uid'], to], 'state': 'invited', 'wins': {u['uid']: 0, to: 0},
+                         'matches': [], 'created': now()}
+    save()
+    return {'ok': True, 'series': sid}
+
+def h_series_respond(u, b):
+    s = DB['series'].get(b.get('id'))
+    if not s or s['state'] != 'invited' or s['players'][1] != u['uid']:
+        raise ApiError('no_series', 'That challenge is gone.')
+    if not b.get('accept'):
+        move('escrow', U(s['players'][0]), s['stake'], 'series_declined', s['id'])
+        s['state'] = 'declined'
+        save()
+        return {'ok': True, 'state': 'declined'}
+    if u['balance'] < s['stake']:
+        raise ApiError('insufficient_pls', 'Not enough PLS.')
+    ac_block(u, s['stake'])
+    move(U(u['uid']), 'escrow', s['stake'], 'series_stake', s['game'])
+    s['state'] = 'active'
+    s['matches'].append(create_match(s['players'][0], s['players'][1], s['game'], 0)['id'])
+    DB['matches'][s['matches'][-1]]['series'] = s['id']
+    save()
+    return {'ok': True, 'series': series_view(s, u['uid'])}
+
+def tick_series():
+    for s in DB['series'].values():
+        if s['state'] == 'invited' and now() - s['created'] > 3600:
+            move('escrow', U(s['players'][0]), s['stake'], 'series_expired', s['id'])
+            s['state'] = 'expired'
+        if s['state'] != 'active':
+            continue
+        m = DB['matches'].get(s['matches'][-1])
+        if not m or m['state'] == 'active':
+            continue
+        w = (m.get('result') or {}).get('winner')
+        if w:
+            wid = DB['names'][w.lower()]
+            s['wins'][wid] += 1
+        a, b2 = s['players']
+        champ = next((p for p in s['players'] if s['wins'][p] >= 2), None)
+        if champ is None and len(s['matches']) >= 5:
+            champ = a if s['wins'][a] > s['wins'][b2] else b2 if s['wins'][b2] > s['wins'][a] else 'draw'
+        if champ == 'draw':
+            for p in s['players']:
+                move('escrow', U(p), s['stake'], 'series_draw', s['id'])
+            s['state'], s['winner'] = 'settled', None
+        elif champ:
+            pot = s['stake'] * 2
+            rake = int(pot * RAKE)
+            move('escrow', U(champ), pot - rake, 'series_win', s['id'])
+            move('escrow', 'burn', rake, 'series_rake', s['id'])
+            s['state'], s['winner'] = 'settled', DB['users'][champ]['username']
+        else:
+            nm = create_match(a, b2, s['game'], 0)
+            nm['series'] = s['id']
+            s['matches'].append(nm['id'])
+    if len(DB['series']) > 3000:
+        keep = sorted(DB['series'].values(), key=lambda s: s['created'])[-2000:]
+        DB['series'] = {s['id']: s for s in keep}
+
+def h_series_status(u, q):
+    tick_series()
+    mine = sorted([s for s in DB['series'].values() if u['uid'] in s['players']], key=lambda s: -s['created'])[:10]
+    return {'ok': True, 'series': [series_view(s, u['uid']) for s in mine],
+            'invites': [{'id': s['id'], 'from': DB['users'][s['players'][0]]['username'], 'game': s['game'], 'stake': s['stake']}
+                        for s in DB['series'].values() if s['state'] == 'invited' and s['players'][1] == u['uid']]}
+
+def h_rematch(u, b):
+    m = DB['matches'].get(b.get('match_id'))
+    if not m or u['uid'] not in m['players'] or m['state'] != 'settled' or not m.get('result', {}).get('winner'):
+        raise ApiError('no_rematch', 'Only a finished duel with a winner can be rematched.')
+    if m['result']['winner'] == u['username']:
+        raise ApiError('winner_cant', 'The loser calls the rematch.')
+    if m.get('rematched'):
+        raise ApiError('already', 'A rematch was already offered.')
+    stake = max(10, m['stake'] * 2)
+    if stake not in STAKES:
+        raise ApiError('stake_too_high', 'That stake is too high for a rematch.')
+    out = h_pvp_challenge(u, {'username': m['result']['winner'], 'game': m['game'], 'stake': stake})
+    m['rematched'] = True
+    save()
+    return dict(out, stake=stake)
+
+# ---------------------------------------------------------------------------
+# SPECTATING: live duel feed, replays, reactions
+# ---------------------------------------------------------------------------
+EMOTES = ['cheer', 'wow', 'laugh', 'gg', 'fire', 'salute']
+
+def h_duels_live(u, q):
+    pvp_housekeeping()
+    rows = sorted(DB['matches'].values(), key=lambda m: -m['created'])[:40]
+    out = []
+    for m in rows:
+        a, b2 = [DB['users'].get(p, {}).get('username', '?') for p in m['players']]
+        out.append({'id': m['id'], 'game': m['game'], 'stake': m['stake'], 'a': a, 'b': b2, 'state': m['state'],
+                    'played': len(m['subs']), 'winner': (m.get('result') or {}).get('winner'),
+                    'reactions': len(DB['reactions'].get(m['id'], []))})
+    return {'ok': True, 'duels': out}
+
+def h_duel_replay(u, q):
+    m = DB['matches'].get((q.get('id') or [''])[0])
+    if not m:
+        raise ApiError('no_match')
+    if m['state'] == 'active' and u['uid'] not in m['players']:
+        raise ApiError('still_live', 'Replays unlock when the duel ends.')
+    sides = []
+    for p in m['players']:
+        s = m['subs'].get(p) or {}
+        sides.append({'username': DB['users'][p]['username'], 'score': s.get('score'), 'detail': s.get('detail'),
+                      'replay': s.get('replay') if m['state'] != 'active' else None})
+    return {'ok': True, 'id': m['id'], 'game': m['game'], 'stake': m['stake'], 'state': m['state'], 'result': m.get('result'),
+            'challenge': make_challenge(m['game'], m['seed']) if m['state'] != 'active' else None, 'sides': sides,
+            'reactions': DB['reactions'].get(m['id'], [])[-30:]}
+
+def h_duel_react(u, b):
+    mid, e = b.get('id'), b.get('emote')
+    if mid not in DB['matches'] or e not in EMOTES:
+        raise ApiError('bad_reaction')
+    r = DB['reactions'].setdefault(mid, [])
+    r.append({'from': u['username'], 'emote': e, 't': now()})
+    DB['reactions'][mid] = r[-50:]
+    if len(DB['reactions']) > 2000:
+        for k in list(DB['reactions'])[:500]:
+            DB['reactions'].pop(k, None)
+    save()
+    return {'ok': True}
+
+def h_emote(u, b):
+    e = b.get('emote')
+    if e not in EMOTES + ['dance', 'flex', 'slump', 'wave']:
+        raise ApiError('bad_emote')
+    act(u, 'town')
+    if now() - u['last_chat'] < 2.5:
+        raise ApiError('slow_mode', 'Slow down a little.', 429)
+    u['last_chat'] = now()
+    c = crew_tag(u)
+    DB['messages'].append({'id': next_id('x'), 'channel': 'lobby', 'from': u['username'], 'level': level_for(u['xp']),
+                           'crew': c['tag'] if c else '', 'text': '*%s*' % e, 'emote': e, 't': now()})
+    DB['messages'] = DB['messages'][-3000:]
+    save()
+    return {'ok': True}
+
+# ---------------------------------------------------------------------------
+# CAVE EXPEDITIONS
+# ---------------------------------------------------------------------------
+EXP_COST = {'coal': 6}           # lamp oil is made from coal
+EXP_OIL = 100
+
+def exp_floor(seed, floor):
+    rng = random.Random(seed * 1000 + floor)
+    tier = min(4, 1 + (floor - 1) // 3)
+    zone = max(0.09, 0.26 - floor * 0.012)
+    return {'floor': floor, 'tier': tier, 'ore': TIERS[tier - 1]['ore'], 'hp': 8 + floor * 3,
+            'speed': round(0.55 + floor * 0.06, 4), 'offset': round(rng.random(), 4),
+            'zone_center': round(rng.uniform(zone / 2 + 0.05, 1 - zone / 2 - 0.05), 4), 'zone_width': round(zone, 4)}
+
+def exp_view(e):
+    if not e:
+        return None
+    f = exp_floor(e['seed'], e['floor'])
+    return {'floor': e['floor'], 'oil': e['oil'], 'hp': e['hp'], 'hp_max': f['hp'], 'haul': e['haul'], 'challenge': f,
+            'cleared': e['cleared'], 'oil_per_strike': 3 + e['floor'] // 3}
+
+def h_expedition(u, q):
+    return {'ok': True, 'expedition': exp_view(u['expedition']), 'deepest': u['deepest'], 'cost': EXP_COST}
+
+def h_exp_start(u, b):
+    if u['expedition']:
+        raise ApiError('in_expedition', 'You are already down there.')
+    pay_ore(u, EXP_COST)
+    seed = secrets.randbits(40)
+    u['expedition'] = {'seed': seed, 'floor': 1, 'oil': EXP_OIL, 'hp': exp_floor(seed, 1)['hp'], 'cleared': False,
+                       'haul': {'ore': {}, 'gems': {}, 'xp': 0}, 'issued': now(), 'last': 0}
+    act(u, 'expedition')
+    save()
+    return {'ok': True, 'expedition': exp_view(u['expedition'])}
+
+def h_exp_strike(u, b):
+    e = u['expedition']
+    if not e or e['cleared']:
+        raise ApiError('no_vein', 'Descend to the next floor or climb out.')
+    tap = to_int(b.get('tap_ms'), -1)
+    elapsed = int((now() - e['issued']) * 1000)
+    if tap < 150 or tap > elapsed + 150 or tap > 9000:
+        raise ApiError('bad_timing', 'Strike timing did not match the server clock.')
+    if now() - e['last'] < STRIKE_GAP:
+        raise ApiError('too_fast', 'Catch your breath between strikes.', 429)
+    e['last'] = now()
+    f = exp_floor(e['seed'], e['floor'])
+    d = abs(marker_pos(f, tap) - f['zone_center'])
+    half = f['zone_width'] / 2
+    q = 'perfect' if d <= half * 0.3 else 'great' if d <= half * 0.65 else 'good' if d <= half else 'miss'
+    e['oil'] -= 3 + e['floor'] // 3
+    e['hp'] -= QUALITY_DAMAGE[q] + (gear_effect(u, 'pickaxe') if q != 'miss' else 0)
+    e['issued'] = now()
+    gem = None
+    if e['hp'] <= 0:
+        e['cleared'] = True
+        amt = 2 + e['floor']
+        e['haul']['ore'][f['ore']] = e['haul']['ore'].get(f['ore'], 0) + amt
+        e['haul']['xp'] += 3 * e['floor']
+        if random.random() < min(0.6, 0.05 * e['floor']):
+            gem = GEMS[f['tier']]
+            e['haul']['gems'][gem] = e['haul']['gems'].get(gem, 0) + 1
+        u['deepest'] = max(u['deepest'], e['floor'])
+    collapsed = False
+    if e['oil'] <= 0:
+        collapsed = True
+        out = exp_bank(u, half_lost=True)
+    else:
+        out = {'expedition': exp_view(e)}
+    save()
+    return dict(out, ok=True, quality=q, marker=round(marker_pos(f, tap), 4), gem=gem, collapsed=collapsed, deepest=u['deepest'])
+
+def h_exp_descend(u, b):
+    e = u['expedition']
+    if not e or not e['cleared']:
+        raise ApiError('vein_first', 'Clear this floor first.')
+    e['floor'] += 1
+    e['hp'] = exp_floor(e['seed'], e['floor'])['hp']
+    e['cleared'] = False
+    e['issued'] = now()
+    save()
+    return {'ok': True, 'expedition': exp_view(e)}
+
+def exp_bank(u, half_lost=False):
+    e = u['expedition']
+    h = e['haul']
+    k = 0.5 if half_lost else 1.0
+    got = {'ore': {o: int(n * k) for o, n in h['ore'].items()}, 'gems': {g: int(n * k) for g, n in h['gems'].items()},
+           'xp': int(h['xp'] * k)}
+    for o, n in got['ore'].items():
+        u['ore'][o] += n
+    for g, n in got['gems'].items():
+        u['gems'][g] += n
+    u['xp'] += got['xp']
+    u['expedition'] = None
+    check_badges(u)
+    return {'expedition': None, 'banked': got, 'floor_reached': e['floor'], 'lost_half': half_lost}
+
+def h_exp_exit(u, b):
+    if not u['expedition']:
+        raise ApiError('no_expedition')
+    out = exp_bank(u)
+    act(u, 'town')
+    save()
+    return dict(out, ok=True)
+
+# ---------------------------------------------------------------------------
+# FISHING at the underground lake
+# ---------------------------------------------------------------------------
+FISH = [('Cave Minnow', 50, 4, 10), ('Glowgill', 25, 8, 20), ('Rock Perch', 14, 15, 35), ('Crystal Carp', 7, 25, 60),
+        ('Lantern Eel', 3, 40, 110), ('Void Leviathan', 1, 80, 300)]   # name, weight, min cm, max cm
+
+def h_fish_cast(u, b):
+    bite = random.randint(1500, 6500)
+    u['fishing'] = {'bite': bite, 'issued': now(), 'window': 520}
+    act(u, 'fishing')
+    save()
+    return {'ok': True, 'bite_ms': bite, 'window_ms': 520}
+
+def h_fish_reel(u, b):
+    f = u['fishing']
+    if not f:
+        raise ApiError('no_cast', 'Cast your line first.')
+    u['fishing'] = None
+    tap = to_int(b.get('tap_ms'), -1)
+    elapsed = int((now() - f['issued']) * 1000)
+    if tap < 0 or tap > elapsed + 150:
+        raise ApiError('bad_timing')
+    rt = tap - f['bite']
+    if rt < 0:
+        save()
+        return {'ok': True, 'caught': False, 'why': 'Too early! The fish got spooked.'}
+    if rt > f['window']:
+        save()
+        return {'ok': True, 'caught': False, 'why': 'Too slow. It stole the bait.'}
+    luck = 1.0 + max(0, (f['window'] - rt)) / f['window'] * 2      # faster reel = better odds of rare fish
+    weights = [w * (luck ** i) for i, (_, w, _, _) in enumerate(FISH)]
+    i = random.choices(range(len(FISH)), weights)[0]
+    name, _, lo, hi = FISH[i]
+    size = random.randint(lo, hi)
+    u['fish'][name] = u['fish'].get(name, 0) + 1
+    rec = size > u['fish_best'].get(name, 0)
+    if rec:
+        u['fish_best'][name] = size
+    u['xp'] += 2 + i * 3
+    check_badges(u)
+    save()
+    return {'ok': True, 'caught': True, 'fish': name, 'size_cm': size, 'record': rec, 'rarity': i, 'xp': u['xp'], 'reaction_ms': rt}
+
+# ---------------------------------------------------------------------------
+# HOME CABIN (trophy shelves; friends can visit)
+# ---------------------------------------------------------------------------
+CABIN_SLOTS = 6
+
+def trophies_of(u):
+    t = [{'id': 'badge:' + k, 'name': BADGE_INFO.get(k, {}).get('name', k), 'kind': 'badge'} for k in u['badges']]
+    t += [{'id': 'fish:' + n, 'name': '%s (%d cm)' % (n, s), 'kind': 'fish'} for n, s in u['fish_best'].items()]
+    t += [{'id': 'gem:' + g, 'name': g.title(), 'kind': 'gem'} for g, n in u['gems'].items() if n > 0]
+    t += [{'id': 'pet:' + p, 'name': PETS[p][0], 'kind': 'pet'} for p in u['pets']]
+    return t
+
+def h_cabin(u, q):
+    who = (q.get('user') or [''])[0].strip().lower()
+    v = user_fix(DB['users'][DB['names'][who]]) if who in DB['names'] else u
+    have = {t['id']: t for t in trophies_of(v)}
+    shelves = [have.get(x) if x else None for x in (v['cabin'] + [''] * CABIN_SLOTS)[:CABIN_SLOTS]]
+    return {'ok': True, 'owner': v['username'], 'shelves': shelves, 'available': list(have.values()) if v is u else []}
+
+def h_cabin_place(u, b):
+    slot = to_int(b.get('slot'), -1)
+    item = str(b.get('item') or '')
+    if slot < 0 or slot >= CABIN_SLOTS:
+        raise ApiError('bad_slot')
+    if item and item not in {t['id'] for t in trophies_of(u)}:
+        raise ApiError('not_owned', 'You do not have that trophy.')
+    shelves = (u['cabin'] + [''] * CABIN_SLOTS)[:CABIN_SLOTS]
+    shelves[slot] = item
+    u['cabin'] = shelves
+    save()
+    return {'ok': True}
+
+# ---------------------------------------------------------------------------
+# AUCTION HOUSE (ore, gems, fish) - 5% of each sale is burned
+# ---------------------------------------------------------------------------
+def _take_item(u, kind, item, qty):
+    if kind == 'ore':
+        if item not in ORES or u['ore'][item] < qty:
+            raise ApiError('not_enough', 'You do not have that many.')
+        u['ore'][item] -= qty
+    elif kind == 'gem':
+        if item not in GEM_NAMES or u['gems'][item] < qty:
+            raise ApiError('not_enough', 'You do not have that many.')
+        u['gems'][item] -= qty
+    elif kind == 'fish':
+        if u['fish'].get(item, 0) < qty:
+            raise ApiError('not_enough', 'You do not have that many.')
+        u['fish'][item] -= qty
+    else:
+        raise ApiError('bad_kind')
+
+def _give_item(u, kind, item, qty):
+    if kind == 'ore':
+        u['ore'][item] += qty
+    elif kind == 'gem':
+        u['gems'][item] += qty
+    else:
+        u['fish'][item] = u['fish'].get(item, 0) + qty
+
+def tick_market():
+    for x in DB['market']:
+        if x['state'] == 'open' and now() - x['t'] > 3 * 86400:
+            _give_item(user_fix(DB['users'][x['seller']]), x['kind'], x['item'], x['qty'])
+            x['state'] = 'expired'
+    DB['market'] = [x for x in DB['market'] if x['state'] == 'open' or now() - x['t'] < 7 * 86400][-2000:]
+
+def h_market(u, q):
+    rows = [{'id': x['id'], 'kind': x['kind'], 'item': x['item'], 'qty': x['qty'], 'price': x['price'],
+             'seller': DB['users'][x['seller']]['username'], 'mine': x['seller'] == u['uid']} for x in DB['market'] if x['state'] == 'open']
+    return {'ok': True, 'listings': sorted(rows, key=lambda r: (r['kind'], r['item'], r['price'] / max(1, r['qty']))), 'fee': MARKET_FEE}
+
+def h_market_sell(u, b):
+    kind, item = str(b.get('kind', '')), str(b.get('item', ''))
+    qty, price = to_int(b.get('qty'), 0), to_int(b.get('price'), 0)
+    if qty < 1 or qty > 10000 or price < 1 or price > 100000:
+        raise ApiError('bad_listing', 'Check the amount and price.')
+    if sum(1 for x in DB['market'] if x['seller'] == u['uid'] and x['state'] == 'open') >= 10:
+        raise ApiError('too_many', 'You can have 10 listings at a time.')
+    _take_item(u, kind, item, qty)
+    x = {'id': next_id('a'), 'seller': u['uid'], 'kind': kind, 'item': item, 'qty': qty, 'price': price, 't': now(), 'state': 'open'}
+    DB['market'].append(x)
+    save()
+    return {'ok': True, 'listing': x['id']}
+
+def h_market_buy(u, b):
+    x = next((x for x in DB['market'] if x['id'] == b.get('id') and x['state'] == 'open'), None)
+    if not x:
+        raise ApiError('gone', 'That listing is gone.')
+    if x['seller'] == u['uid']:
+        raise ApiError('own_listing', 'That is your own listing.')
+    if u['balance'] < x['price']:
+        raise ApiError('insufficient_pls', 'Not enough PLS.')
+    fee = max(1, int(x['price'] * MARKET_FEE)) if x['price'] >= 2 else 0
+    move(U(u['uid']), U(x['seller']), x['price'] - fee, 'market_sale', x['id'])
+    if fee:
+        move(U(u['uid']), 'burn', fee, 'market_fee', x['id'])
+    _give_item(u, x['kind'], x['item'], x['qty'])
+    x['state'], x['buyer'] = 'sold', u['uid']
+    save()
+    return {'ok': True, 'balance': u['balance']}
+
+def h_market_cancel(u, b):
+    x = next((x for x in DB['market'] if x['id'] == b.get('id') and x['state'] == 'open' and x['seller'] == u['uid']), None)
+    if not x:
+        raise ApiError('gone', 'That listing is gone.')
+    _give_item(u, x['kind'], x['item'], x['qty'])
+    x['state'] = 'cancelled'
+    save()
+    return {'ok': True}
+
+# ---------------------------------------------------------------------------
+# GEAR RENTAL (24 hours; 5% of the fee is burned)
+# ---------------------------------------------------------------------------
+def rent_return(r):
+    owner = user_fix(DB['users'][r['owner']])
+    g = dict(r['gear'])
+    if r.get('renter'):
+        renter = user_fix(DB['users'][r['renter']])
+        cur = renter['gear'].get(g['slot'])
+        if cur and cur.get('rental') == r['id']:
+            g = {k: v for k, v in cur.items() if k not in ('rental', 'rented_until', 'owner_name')}
+            del renter['gear'][g['slot']]
+        back = renter['stash'].pop(g['slot'], None)
+        if back:
+            renter['gear'][g['slot']] = back
+    if g['slot'] in owner['gear']:
+        owner['stash'][g['slot'] + '_returned'] = g
+    else:
+        owner['gear'][g['slot']] = g
+    r['state'] = 'returned'
+
+def tick_rentals():
+    for r in DB['rentals']:
+        if r['state'] == 'rented' and r['until'] < now():
+            rent_return(r)
+    DB['rentals'] = [r for r in DB['rentals'] if r['state'] in ('offered', 'rented') or now() - r['t'] < 3 * 86400][-1000:]
+
+def h_rentals(u, q):
+    rows = [{'id': r['id'], 'gear': r['gear']['name'], 'slot': r['gear']['slot'], 'tier': r['gear']['tier'], 'stars': r['gear'].get('stars', 0),
+             'dur': r['gear']['dur'], 'price': r['price'], 'owner': DB['users'][r['owner']]['username'], 'state': r['state'],
+             'mine': r['owner'] == u['uid'], 'renting': r.get('renter') == u['uid'],
+             'ends_in': int(r['until'] - now()) if r['state'] == 'rented' else None}
+            for r in DB['rentals'] if r['state'] in ('offered', 'rented')]
+    return {'ok': True, 'rentals': rows, 'fee': MARKET_FEE, 'returned': {k: v['name'] for k, v in u['stash'].items() if k.endswith('_returned')}}
+
+def h_rent_offer(u, b):
+    slot = b.get('slot')
+    g = u['gear'].get(slot)
+    price = to_int(b.get('price'), 0)
+    if not g or g.get('rental'):
+        raise ApiError('no_gear', 'You do not own gear in that slot.')
+    if g.get('dur', 0) <= 0:
+        raise ApiError('broken', 'Repair it before renting it out.')
+    if price < 5 or price > 5000:
+        raise ApiError('bad_price', 'Rent is 5 to 5000 PLS per day.')
+    del u['gear'][slot]
+    r = {'id': next_id('r'), 'owner': u['uid'], 'gear': g, 'price': price, 'state': 'offered', 't': now(), 'until': 0}
+    DB['rentals'].append(r)
+    save()
+    return {'ok': True, 'rental': r['id']}
+
+def h_rent_take(u, b):
+    r = next((r for r in DB['rentals'] if r['id'] == b.get('id') and r['state'] == 'offered'), None)
+    if not r:
+        raise ApiError('gone', 'That gear was already rented.')
+    if r['owner'] == u['uid']:
+        raise ApiError('own_gear', 'That is your own gear.')
+    slot = r['gear']['slot']
+    if u['gear'].get(slot, {}).get('rental'):
+        raise ApiError('already_renting', 'You are already renting gear for that slot.')
+    if u['balance'] < r['price']:
+        raise ApiError('insufficient_pls', 'Not enough PLS.')
+    fee = max(1, int(r['price'] * MARKET_FEE))
+    move(U(u['uid']), U(r['owner']), r['price'] - fee, 'rent_fee', r['id'])
+    move(U(u['uid']), 'burn', fee, 'rent_burn', r['id'])
+    if slot in u['gear']:
+        u['stash'][slot] = u['gear'][slot]
+    u['gear'][slot] = dict(r['gear'], rental=r['id'], rented_until=now() + 86400, owner_name=DB['users'][r['owner']]['username'])
+    r.update({'state': 'rented', 'renter': u['uid'], 'until': now() + 86400})
+    save()
+    return {'ok': True, 'profile': profile_view(u)}
+
+def h_rent_cancel(u, b):
+    r = next((r for r in DB['rentals'] if r['id'] == b.get('id') and r['owner'] == u['uid'] and r['state'] == 'offered'), None)
+    if not r:
+        raise ApiError('gone', 'Only gear nobody has rented yet can be taken back.')
+    rent_return(r)
+    save()
+    return {'ok': True}
+
+def h_stash_claim(u, b):
+    slot = str(b.get('slot', ''))
+    g = u['stash'].get(slot + '_returned')
+    if not g:
+        raise ApiError('nothing')
+    old = u['gear'].get(slot)
+    if old and old.get('rental'):
+        raise ApiError('renting', 'Wait for your rental to end first.')
+    u['gear'][slot] = g
+    del u['stash'][slot + '_returned']
+    if old:
+        u['stash'][slot + '_returned'] = old
+    save()
+    return {'ok': True, 'profile': profile_view(u)}
+
+# ---------------------------------------------------------------------------
+# NETWORK STATS, PRESENCE, TRANSPARENCY
+# ---------------------------------------------------------------------------
+def _today_start():
+    d = datetime.datetime.utcnow()
+    return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc).timestamp()
+
+def network_stats():
+    online = [n for n in DB['nodes'].values() if now() - n.get('last_hb', 0) < HB_INTERVAL * 2.5]
+    bands = {}
+    for n in online:
+        tz = n.get('tz')
+        if isinstance(tz, int):
+            k = max(-12, min(14, int(round(tz / 60.0))))
+            bands[k] = bands.get(k, 0) + 1
+    t0 = _today_start()
+    burned_today = sum(e['amt'] for e in DB['ledger'] if e['to'] == 'burn' and e['t'] >= t0)
+    paid_day = sum(r['pls'] for r in DB['node_rewards'] if r['t'] > now() - 86400)
+    held = sum(x['balance'] for x in DB['users'].values())
+    locked = DB['accounts'].get('escrow', 0) + DB['accounts'].get('pots', 0)
+    paydays = {}
+    for r in DB['node_rewards'][-3000:]:
+        p = paydays.setdefault(r['epoch'], {'epoch': r['epoch'], 'pls': 0, 'nodes': 0})
+        p['pls'] += r['pls']
+        p['nodes'] += 1
+    last = sorted(paydays.values(), key=lambda p: -p['epoch'])[:12]
+    for p in last:
+        p['at'] = int((p['epoch'] + 1) * EPOCH_SECONDS)
+    return {'nodes_online': len(online), 'nodes_total': len(DB['nodes']), 'players': len(DB['users']),
+            'miners_now': sum(1 for x in DB['users'].values() if now() - x.get('last_strike', 0) < 120),
+            'by_utc_offset': {str(k): v for k, v in sorted(bands.items())}, 'next_payday_in': int(EPOCH_SECONDS - now() % EPOCH_SECONDS),
+            'payday_minutes': EPOCH_SECONDS // 60, 'paid_last_24h': paid_day, 'burned_today': burned_today,
+            'burned_total': DB['accounts'].get('burn', 0), 'minted_total': -DB['accounts'].get('mint', 0),
+            'held_by_players': held, 'locked_in_games': locked, 'house': DB['accounts'].get('house', 0),
+            'ledger_balanced': (sum(DB['accounts'].values()) + held) == 0, 'paydays': last, 'version': VERSION,
+            'events': events_view()}
+
+def h_network(q):
+    return dict(network_stats(), ok=True)
+
+_v4_h_friends = h_friends
+def h_friends(u, q):
+    out = _v4_h_friends(u, q)
+    for f in out['friends']:
+        x = DB['users'].get(DB['names'].get(f['username'].lower(), ''), {})
+        a = x.get('activity', {})
+        f['doing'] = a.get('what', 'town') if now() - a.get('t', 0) < 120 else None
+        f['mining'] = now() - x.get('last_strike', 0) < 90
+    out['friends'].sort(key=lambda f: (not f['mining'], not f['online'], f['username'].lower()))
+    return out
+
+_v4_h_node_register = h_node_register
+def h_node_register(u, b):
+    out = _v4_h_node_register(u, b)
+    tz = to_int(b.get('tz'), None)
+    if tz is not None and -900 <= tz <= 900:
+        for n in DB['nodes'].values():
+            if n['uid'] == u['uid']:
+                n['tz'] = tz
+    return out
+
+_v4_h_node_heartbeat = h_node_heartbeat
+def h_node_heartbeat(u, b):
+    out = _v4_h_node_heartbeat(u, b)
+    tz = to_int(b.get('tz'), None)
+    sess = DB['node_sessions'].get(str(b.get('node_token', '')))
+    if tz is not None and -900 <= tz <= 900 and sess:
+        n = DB['nodes'].get(sess['node'])
+        if n and n['uid'] == u['uid']:
+            n['tz'] = tz
+    return out
+
+# ---------------------------------------------------------------------------
+# ONE-TAP WALLET LINK: the player signs a message inside Phantom or Solflare
+# ---------------------------------------------------------------------------
+def ed25519_verify(pub, msg, sig):
+    if len(pub) != 32 or len(sig) != 64:
+        return False
+    A, R = _ed_dec(pub), _ed_dec(sig[:32])
+    if A is None or R is None:
+        return False
+    S = int.from_bytes(sig[32:], 'little')
+    if S >= ED_L:
+        return False
+    k = _ed_h(sig[:32] + pub + msg) % ED_L
+    return _ed_eq(_ed_mul(S, ED_G), _ed_add(R, _ed_mul(k, A)))
+
+def link_message(code):
+    return 'Link this wallet to my Pulse account. Code: %s' % code
+
+def base_url(handler):
+    host = handler.headers.get('X-Forwarded-Host') or handler.headers.get('Host') or 'localhost'
+    proto = handler.headers.get('X-Forwarded-Proto') or ('https' if 'onrender.com' in host else 'http')
+    return '%s://%s' % (proto, host)
+
+def h_wallet_link_start(u, b):
+    from urllib.parse import quote
+    code = secrets.token_hex(4).upper()
+    for k in [k for k, v in DB['wallet_links'].items() if v['exp'] < now()]:
+        del DB['wallet_links'][k]
+    DB['wallet_links'][code] = {'uid': u['uid'], 'exp': now() + 600}
+    base = b.get('_base', '')
+    url = '%s/wallet/connect?code=%s' % (base, code)
+    save()
+    return {'ok': True, 'code': code, 'url': url, 'expires_in': 600,
+            'phantom': 'https://phantom.app/ul/browse/%s?ref=%s' % (quote(url, safe=''), quote(base, safe='')),
+            'solflare': 'https://solflare.com/ul/v1/browse/%s?ref=%s' % (quote(url, safe=''), quote(base, safe=''))}
+
+def h_wallet_link_finish(b, ip):
+    import base64
+    code = str(b.get('code', '')).upper()
+    link = DB['wallet_links'].get(code)
+    if not link or link['exp'] < now():
+        raise ApiError('code_expired', 'That link code expired. Start again in the app.')
+    try:
+        pub = b58decode(str(b.get('pubkey', '')))
+        sig_raw = str(b.get('sig', ''))
+        sig = base64.b64decode(sig_raw) if b.get('enc') == 'base64' else b58decode(sig_raw)
+    except Exception:
+        raise ApiError('bad_signature', 'Could not read the wallet signature.')
+    if not ed25519_verify(pub, link_message(code).encode(), sig):
+        raise ApiError('bad_signature', 'The wallet signature did not check out.')
+    u = DB['users'].get(link['uid'])
+    if not u:
+        raise ApiError('no_user')
+    u['sol_wallet'] = str(b.get('pubkey'))
+    del DB['wallet_links'][code]
+    save()
+    return {'ok': True, 'wallet': u['sol_wallet'], 'username': u['username']}
+
+def h_wallet_link_check(u, q):
+    return {'ok': True, 'sol_wallet': u.get('sol_wallet')}
+
+WALLET_PAGE = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link your wallet - Pulse</title><style>body{margin:0;background:#0e0c0a;color:#f1e6cf;font:18px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}
+main{max-width:420px;padding:28px;text-align:center}h1{font-size:28px;margin:0 0 8px}p{color:#b4a58a}
+button{font:inherit;font-weight:700;background:#e8a33a;color:#1b1206;border:2px solid #000;border-radius:8px;padding:14px 22px;margin-top:18px;cursor:pointer}
+code{color:#3fd0bd}#s{margin-top:18px;min-height:28px}.ok{color:#3fd0bd}.bad{color:#ff8a6a}</style></head><body><main>
+<h1>Link your wallet</h1><p>Pulse will send your node rewards as PULSE to this wallet. Signing proves the wallet is yours. It costs nothing and moves no funds.</p>
+<p>Code <code id="c"></code></p><button id="go">Connect and sign</button><div id="s"></div></main>
+<script>
+const code=new URLSearchParams(location.search).get('code')||'';document.getElementById('c').textContent=code;
+const S=document.getElementById('s');const say=(t,c)=>{S.textContent=t;S.className=c||''};
+const A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function b58(b){let n=0n;for(const x of b)n=n*256n+BigInt(x);let s='';while(n>0n){s=A[Number(n%58n)]+s;n/=58n}for(const x of b){if(x)break;s='1'+s}return s}
+document.getElementById('go').onclick=async()=>{try{
+const p=(window.phantom&&window.phantom.solana)||window.solflare||window.solana;
+if(!p){say('Open this page inside the Phantom or Solflare app.','bad');return}
+await p.connect();const msg=new TextEncoder().encode('Link this wallet to my Pulse account. Code: '+code);
+const r=await p.signMessage(msg,'utf8');const sig=r.signature||r;const pk=(r.publicKey||p.publicKey).toBytes?(r.publicKey||p.publicKey).toBytes():null;
+const pub=pk?b58(pk):(p.publicKey.toString());
+const res=await fetch('/wallet/link/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,pubkey:pub,sig:b58(new Uint8Array(sig))})});
+const j=await res.json();if(j.ok)say('Linked to '+j.username+'! You can go back to Pulse now.','ok');else say(j.message||'That did not work.','bad');
+}catch(e){say('Cancelled or failed: '+(e.message||e),'bad')}};
+</script></body></html>'''
+
+# ---------------------------------------------------------------------------
+# SHARE CARDS: a public page for a big moment, built from server data only
+# ---------------------------------------------------------------------------
+def h_share_create(u, b):
+    kind = b.get('kind')
+    lvl = level_for(u['xp'])
+    if kind == 'profile':
+        lines = ['Level %d %s' % (lvl, title_for(lvl)), '%d veins cleared' % u['lifetime_blocks'],
+                 'Best streak: %d perfect strikes' % u['best_streak'], '%d badges' % len(u['badges'])]
+        title = '%s on Pulse' % u['username']
+    elif kind == 'duel':
+        m = DB['matches'].get(b.get('match_id'))
+        if not m or u['uid'] not in m['players'] or m['state'] != 'settled' or (m.get('result') or {}).get('winner') != u['username']:
+            raise ApiError('no_win', 'Only duels you won can be shared.')
+        opp = DB['users'][[p for p in m['players'] if p != u['uid']][0]]['username']
+        title = '%s won a %s duel' % (u['username'], m['game'])
+        lines = ['Beat %s' % opp, 'Score %d vs %d' % (m['subs'][u['uid']]['score'], (m['subs'].get([p for p in m['players'] if p != u['uid']][0]) or {}).get('score', 0)),
+                 'Pot: %d PLS' % (m['stake'] * 2)]
+    elif kind == 'expedition':
+        title = '%s reached floor %d' % (u['username'], u['deepest'])
+        lines = ['Deepest expedition: floor %d' % u['deepest'], 'Level %d %s' % (lvl, title_for(lvl))]
+    else:
+        raise ApiError('bad_kind')
+    sid = secrets.token_urlsafe(6)
+    DB['shares'][sid] = {'title': title, 'lines': lines, 't': now(), 'by': u['username']}
+    if len(DB['shares']) > 5000:
+        for k in sorted(DB['shares'], key=lambda k: DB['shares'][k]['t'])[:1000]:
+            del DB['shares'][k]
+    save()
+    return {'ok': True, 'id': sid, 'path': '/c/' + sid}
+
+def share_page(sid):
+    import html as _h
+    s = DB['shares'].get(sid)
+    if not s:
+        return None
+    rows = ''.join('<li>%s</li>' % _h.escape(x) for x in s['lines'])
+    t = _h.escape(s['title'])
+    return ('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>%s</title><meta property="og:title" content="%s"><meta property="og:description" content="%s">'
+            '<style>body{margin:0;background:#0e0c0a;color:#f1e6cf;font:18px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}'
+            '.card{width:min(420px,90vw);border:2px solid #000;border-radius:16px;padding:28px;background:linear-gradient(160deg,#1f2b28,#14100c);box-shadow:0 0 40px rgba(63,208,189,.25)}'
+            'h1{font-size:26px;margin:0 0 14px}ul{margin:0;padding-left:20px;color:#b4a58a}.gem{display:inline-block;width:16px;height:20px;margin-right:8px;'
+            'background:linear-gradient(160deg,#9ff3e6,#3fd0bd 45%%,#157a6f);clip-path:polygon(50%% 0,100%% 35%%,80%% 100%%,20%% 100%%,0 35%%)}'
+            'a{color:#e8a33a}p{margin-top:18px;font-size:15px}</style></head><body><div class="card"><div><span class="gem"></span><b>PULSE</b></div>'
+            '<h1>%s</h1><ul>%s</ul><p>Swing the pick. Power the network. <a href="https://shotgunsmiley.github.io/pulse/">Learn about Pulse</a></p></div></body></html>'
+            % (t, t, _h.escape(' / '.join(s['lines'])), t, rows))
+
+# ---------------------------------------------------------------------------
+# PERIODIC WORK (runs at most every 15 s, piggy-backed on requests)
+# ---------------------------------------------------------------------------
+def v5_tick(force=False):
+    if not force and now() - V5['last_tick'] < 15:
+        return
+    V5['last_tick'] = now()
+    try:
+        tick_hidden()
+        tick_seasons()
+        tick_bounties()
+        tick_series()
+        tick_market()
+        tick_rentals()
+        pvp_housekeeping()
+    except Exception:
+        traceback.print_exc()
+
+def h_health(q):
+    return {'ok': True, 'service': 'pulse', 'version': VERSION, 'storage': STORE.name, 'players': len(DB['users']),
+            'mint_policy': MINT_POLICY, 'starter_pls': STARTER_PLS if MINT_POLICY != 'classic' else 25}
+
+# ---------------------------------------------------------------------------
+# ROUTES
+# ---------------------------------------------------------------------------
+GET_PUBLIC.update({'/health': h_health, '/network/stats': h_network})
+GET_ADMIN.update({'/admin/anticheat': h_admin_ac})
+GET_AUTH.update({'/me': h_me, '/badges': h_badges, '/crew/territory': h_territory, '/ghosts': h_ghosts, '/bounties': h_bounties,
+                 '/koth': h_koth, '/series': h_series_status, '/duels/live': h_duels_live, '/duels/replay': h_duel_replay,
+                 '/expedition': h_expedition, '/cabin': h_cabin, '/market': h_market, '/rentals': h_rentals, '/friends': h_friends,
+                 '/wallet/link/check': h_wallet_link_check})
+POST_PUBLIC.update({'/auth/register': h_register, '/wallet/link/finish': h_wallet_link_finish})
+POST_AUTH.update({'/mine/start': h_mine_start, '/mine/strike': h_mine_strike, '/practice/start': h_practice_start,
+                  '/practice/submit': h_practice_submit, '/pvp/submit': h_pvp_submit, '/pet': h_pet, '/me/flags': h_flags,
+                  '/mentor': h_mentor, '/ghost/start': h_ghost_start, '/ghost/submit': h_ghost_submit, '/bounty/post': h_bounty_post,
+                  '/koth/challenge': h_koth_challenge, '/koth/submit': h_koth_submit, '/series/challenge': h_series_challenge,
+                  '/series/respond': h_series_respond, '/pvp/rematch': h_rematch, '/duels/react': h_duel_react, '/emote': h_emote,
+                  '/expedition/start': h_exp_start, '/expedition/strike': h_exp_strike, '/expedition/descend': h_exp_descend,
+                  '/expedition/exit': h_exp_exit, '/fish/cast': h_fish_cast, '/fish/reel': h_fish_reel, '/cabin/place': h_cabin_place,
+                  '/market/sell': h_market_sell, '/market/buy': h_market_buy, '/market/cancel': h_market_cancel,
+                  '/rent/offer': h_rent_offer, '/rent/take': h_rent_take, '/rent/cancel': h_rent_cancel, '/stash/claim': h_stash_claim,
+                  '/wallet/link/start': h_wallet_link_start, '/share/create': h_share_create, '/node/register': h_node_register, '/node/heartbeat': h_node_heartbeat})
+
+def _send_html(handler, text, code=200):
+    raw = text.encode('utf-8')
+    handler.send_response(code)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Content-Length', str(len(raw)))
+    handler.end_headers()
+    handler.wfile.write(raw)
+
+_v4_do_GET = Handler.do_GET
+def _v5_do_GET(self):
+    p = urlparse(self.path).path.rstrip('/')
+    with DB_LOCK:
+        v5_tick()
+    if p == '/wallet/connect':
+        return _send_html(self, WALLET_PAGE)
+    if p.startswith('/c/'):
+        with DB_LOCK:
+            page = share_page(p[3:])
+        return _send_html(self, page or '<h1>Card not found</h1>', 200 if page else 404)
+    return _v4_do_GET(self)
+Handler.do_GET = _v5_do_GET
+
+_v4_do_POST = Handler.do_POST
+def _v5_do_POST(self):
+    with DB_LOCK:
+        v5_tick()
+    if urlparse(self.path).path.rstrip('/') == '/wallet/link/start':
+        b = self.read_json()
+        b['_base'] = base_url(self)
+        def go():
+            u = session_user(self.token())
+            if not u:
+                raise ApiError('login_required', 'Please log in again.', 401)
+            return h_wallet_link_start(u, b)
+        return self.run(go)
+    return _v4_do_POST(self)
+Handler.do_POST = _v5_do_POST
 
 # ---------------------------------------------------------------------------
 # START

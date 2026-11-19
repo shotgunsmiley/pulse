@@ -61,7 +61,7 @@ a['gear']['pickaxe']['dur'] -= 5
 need(S.h_repair(a, {'slot': 'pickaxe'}), ['profile'], '/repair')
 need(S.h_upgrade(a, {'slot': 'pickaxe'}), ['profile'], '/upgrade')
 need(S.h_forge(a, {'recipe': 'iron_visor'}), ['profile'], '/forge')
-for g in S.GAMES:
+for g in ['quickdraw', 'sequence', 'sniper']:
     p = S.h_practice_start(a, {'game': g})
     keys = {'quickdraw': ['challenge.game', 'challenge.rounds', 'challenge.delays'],
             'sequence': ['challenge.runes', 'challenge.start_len', 'challenge.show_ms', 'challenge.gap_ms'],

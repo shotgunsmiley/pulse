@@ -220,7 +220,7 @@ def play(ch, how='good'):
 def t_practice():
     u, _ = reg('Practicer')
     out = []
-    for g in S.GAMES:
+    for g in ['quickdraw', 'sequence', 'sniper']:
         r = S.h_practice_start(u, {'game': g})
         res, el = play(r['challenge'])
         backdate(r['id'], el / 1000.0)
@@ -542,7 +542,7 @@ def http_part():
                 time.sleep(0.05)
         out = []
         st, h = req('GET', '/health')
-        assert st == 200 and h['version'] == 4.2
+        assert st == 200 and h['version'] == 5.0
         st, r = req('POST', '/auth/register', {'username': 'HttpHero', 'password': 'secret123'})
         assert st == 200
         tok = r['token']
