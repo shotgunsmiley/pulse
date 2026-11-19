@@ -2,7 +2,7 @@
 
 A 3D mining and wagering game for Android. You mine **PLS** (Pulse) by playing, then stake it in skill duels, tournaments and luck games.
 
-**PLS can only come from playing.** It enters the game only through mining and quests. In v4 it cannot be bought, sold, sent to another player or cashed out. The long-term goal is a licensed real-money version if state laws allow it, but nothing in v4 moves real money.
+**PLS can only come from playing.** It enters the game only through mining, quests, and your phone acting as a network node while you mine. In v4 it cannot be bought, sold, sent to another player or cashed out. The long-term goal is a licensed real-money version if state laws allow it, but nothing in v4 moves real money.
 
 ---
 
@@ -219,7 +219,7 @@ Fractional payouts are carried forward ("dust") instead of being rounded down, s
 | Part | Technology |
 |---|---|
 | App | Godot 4 (built and tested on 4.7.2), GDScript, Compatibility (OpenGL) renderer, 720x1280 portrait |
-| 3D art | Original low-poly models generated in code. Each surface gets flat shading and vertex colours; glowing parts like crystals and lamps are unlit |
+| 3D art | Original 2007-era style low-poly models generated in code: smooth-shaded adventurer, rolling blended terrain, leafy trees, slate and thatch roofs, distance haze. Glowing parts like crystals and lamps are unlit |
 | 2D art | Original pixel-art icons |
 | Sound | 18 generated sound effects |
 | Server | Python 3 standard library (no framework), multithreaded |
@@ -321,6 +321,8 @@ Full descriptions are in `PULSE_V4_DESIGN.md`.
 - **v3.3**: Kivy app with a Python server.
 - **v3.4**: Pixel art and crash fixes. Builds through Buildozer on Colab.
 - **v3.5**: 10 feature updates.
+- **v4.1**: Phones act as network nodes while mining: their own signing key, a signed handshake, signed heartbeats every 30 s, hourly node rewards in the internal PULSE ledger (exactly once, capped per hour and per day), node status in Profile > Stats, and an admin audit (needs `PULSE_ADMIN_TOKEN` on Render). PULSE is planned as a Solana Token-2022 token later; see the design plan.
+- **v4.0.1**: 2007-era graphics (new adventurer, rolling hills, trees, roofs, lighting) and solid scenery the adventurer walks around.
 - **v4.0**: Full rebuild.
   - Godot 4 app in real 3D.
   - Skill mining.
