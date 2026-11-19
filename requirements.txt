@@ -1,0 +1,3 @@
+# Pulse server v4 uses the Python standard library.
+# psycopg2 is only used when DATABASE_URL is set (keeps accounts on Render's free plan).
+psycopg2-binary
