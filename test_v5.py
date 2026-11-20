@@ -70,7 +70,7 @@ ALLOWED_MINT = ('starter grant (one time)', 'node reward', 'test_grant')
 # ---------------------------------------------------------------------------
 def t_version():
     h = S.h_health({})
-    assert h['version'] == 5.4
+    assert h['version'] == 5.5
     assert 'strikeoff' in S.GAMES and 20 in S.STAKES
     return 'v5.0, 4 skill games, %d stake sizes' % len(S.STAKES)
 
@@ -489,7 +489,7 @@ def http_pass():
                 raw = e.read().decode()
                 return e.code, (json.loads(raw) if raw.startswith('{') else raw)
         st, h = call('/health')
-        assert h['version'] == 5.4
+        assert h['version'] == 5.5
         st, r = call('/auth/register', {'username': 'webby', 'password': 'secret123'})
         tok = r['token']
         st, n = call('/network/stats')

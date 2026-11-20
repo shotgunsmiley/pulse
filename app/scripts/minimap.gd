@@ -71,6 +71,8 @@ func _draw() -> void:
 		draw_circle(_to_map(Vector3.ZERO, hp, yaw, k), 3.0 * k, Color("#8a7a5c"))   # the square
 	var f := PixelFont.font()
 	for p in w.pickables:
+		if p["kind"] == "boss":
+			continue
 		var q := _to_map(p["pos"], hp, yaw, k)
 		if (q - c).length() > R - 6:
 			continue
@@ -91,6 +93,15 @@ func _draw() -> void:
 			var q := _to_map(npc["n"].position, hp, yaw, k)
 			if (q - c).length() < R - 3:
 				draw_circle(q, 3.0, Color("#f0e6a0"))
+	# v5.5: the monster (or its summoning circle) - a pulsing red mark, pinned to the rim when far away
+	if w.area == "town" and str(w.boss_state) in ["countdown", "live"]:
+		var bq := _to_map(w.BOSS_POS, hp, yaw, k)
+		if (bq - c).length() > R - 8:
+			bq = c + (bq - c).normalized() * (R - 8)
+		var pr := 6.0 + 2.5 * sin(t * 7.0)
+		draw_circle(bq, pr, Color("#e64c4c") if w.boss_state == "live" else Color("#ff9a5a"))
+		draw_arc(bq, pr + 1.5, 0, TAU, 14, Color("#1a1612"), 2.0)
+		draw_string(f, bq + Vector2(-4, 5), "!", HORIZONTAL_ALIGNMENT_LEFT, -1, PixelFont.SIZE, Color.WHITE)
 	# you: an arrow pointing the way you face
 	var hy: float = w.hero.rotation.y
 	var face := Vector2(-sin(hy - yaw), -cos(hy - yaw))

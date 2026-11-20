@@ -22,18 +22,21 @@ const SCREENS := {
 	"cabin": preload("res://scripts/screens/cabin.gd"),
 	"market": preload("res://scripts/screens/market.gd"),
 	"network": preload("res://scripts/screens/network.gd"),
+	"boss": preload("res://scripts/screens/boss_panel.gd"),
 }
 const TutorialScript = preload("res://scripts/tutorial.gd")
 const MinimapScript = preload("res://scripts/minimap.gd")
 const PixelFont = preload("res://scripts/pixel_font.gd")
-const LOW_PANELS := ["mine", "expedition", "fishing", "cabin"]
+const LOW_PANELS := ["mine", "expedition", "fishing", "cabin", "boss"]
 const TIER_PITCH := {1: 0.85, 2: 1.0, 3: 1.25, 4: 0.7}
 const BADGE_NAMES := {"founding": "Founding Miner", "first_vein": "First Crack", "veins_100": "Seasoned Miner",
 	"veins_1000": "Mountain Mover", "streak_10": "On Fire", "streak_25": "Inferno", "node_1h": "Node Online",
 	"node_10h": "Node Veteran", "node_100h": "Backbone", "gem_first": "Glitter", "duel_1": "First Blood",
-	"duel_25": "Duelist", "angler": "Angler", "deep_8": "Deep Diver", "deep_15": "Abyss Walker"}
+	"duel_25": "Duelist", "angler": "Angler", "deep_8": "Deep Diver", "deep_15": "Abyss Walker",
+	"slay_golem": "Golem Slayer", "slay_wyrm": "Wyrm Slayer", "slay_spider": "Spider Slayer", "slay_wraith": "Wraith Slayer",
+	"slay_drake": "Drake Slayer", "monster_hunter": "Monster Hunter", "boss_mvp": "Champion of the Square", "final_blow": "Final Blow"}
 const SOUNDS := ["clink", "thud", "coin", "rare", "levelup", "rune0", "rune1", "rune2", "rune3", "buzz", "go",
-	"anvil", "click", "flip", "roll", "boom", "win", "lose", "payday", "chime"]
+	"anvil", "click", "flip", "roll", "boom", "win", "lose", "payday", "chime", "horn", "roar", "mhit", "victory", "escape"]
 const NAV := [["town", "house", "TOWN"], ["mine", "pickaxe", "MINE"], ["forge", "anvil", "FORGE"],
 	["arena", "swords", "ARENA"], ["hall", "dice", "HALL"], ["tavern", "bubble", "TAVERN"], ["board", "scroll", "BOARD"]]
 const SETTINGS_PATH := "user://pulse_settings.json"
@@ -82,6 +85,19 @@ const TIPS := [
 var minimap = null
 var last_payday_epoch := -1
 var audio    # audio.gd: ambience and music
+# v5.5 world bosses
+var boss := {}                # the latest /boss answer
+var boss_at_ms := 0           # when it arrived (the clocks tick locally from here)
+var boss_book := {}           # monster -> name, trick, loot
+var bestiary := {}            # monster -> kills, fights, best damage, escapes
+var boss_log := []
+var boss_poll := 2.0
+var boss_banner: PanelContainer = null
+var boss_banner_label: Label = null
+var boss_banner_btn: Button = null
+var boss_heard := {}          # "<k>:<what>" -> true, so each warning plays once
+var boss_rewards_seen := {}
+var boss_banner_t := 0.0
 
 
 func _ready() -> void:
@@ -288,6 +304,7 @@ func _build_hud() -> void:
 		UI.add_icon(r2, UI.ORE_ICONS[k], 28)
 		hud["ore_" + k] = UI.add_label(r2, "0", 22)
 	hud["xp"] = UI.add_bar(tv, 0.0, UI.TEAL, 10)
+	_build_boss_banner()
 	content = Control.new()
 	content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -421,11 +438,14 @@ func refresh_profile() -> void:
 
 # ---------------------------------------------------------------- travel + panels
 func go(place: String) -> void:
+	if place == "boss":
+		open_boss()
+		return
 	pending_place = place
 	_mark_nav(place)
 	if place == "town":
 		close_panel()
-		audio.set_area("town")
+		audio.set_area("boss" if str(boss.get("state", "")) == "live" else "town")
 		_fetch_leaders()
 		if world.area != "town":
 			world.show_area("town")
@@ -518,6 +538,9 @@ func close_panel() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		if overlay != null:
+			return
+		if current == "boss":
+			go("town")
 			return
 		if current != "" and not current in LOW_PANELS:
 			close_panel()
@@ -780,6 +803,7 @@ func vibrate(ms: int) -> void:
 func _process(delta: float) -> void:
 	if api == null or api.token == "" or layout == null or not layout.visible:
 		return
+	_boss_tick(delta)
 	beat += delta
 	if beat > 45.0:
 		beat = 0.0
@@ -834,3 +858,225 @@ func _write_json(path: String, data: Dictionary) -> void:
 	if f != null:
 		f.store_string(JSON.stringify(data))
 		f.close()
+
+
+
+# ===================================================================== v5.5 WORLD BOSSES
+# One shared monster for everybody. We ask the server what it is doing every few seconds
+# (slower when nothing is happening), show a banner on every screen during the 3-minute
+# countdown and the fight, sound the horn, and show what you won afterwards.
+
+func _build_boss_banner() -> void:
+	boss_banner = PanelContainer.new()
+	boss_banner.add_theme_stylebox_override("panel", UI.box(Color("#3a1712"), Color("#ff9a5a"), 3, 0))
+	boss_banner.visible = false
+	layout.add_child(boss_banner)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	boss_banner.add_child(row)
+	boss_banner_label = Label.new()
+	boss_banner_label.add_theme_font_size_override("font_size", 21)
+	boss_banner_label.add_theme_color_override("font_color", Color("#ffd36b"))
+	boss_banner_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	boss_banner_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	boss_banner_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	row.add_child(boss_banner_label)
+	boss_banner_btn = UI.add_button(row, "GO", "red", 52, 20)
+	boss_banner_btn.custom_minimum_size = Vector2(124, 52)
+	boss_banner_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	boss_banner_btn.pressed.connect(open_boss)
+
+
+func poll_boss_soon() -> void:
+	boss_poll = minf(boss_poll, 0.4)
+
+
+func _boss_tick(delta: float) -> void:
+	boss_poll -= delta
+	if boss_poll <= 0.0:
+		boss_poll = 30.0
+		_poll_boss()
+	boss_banner_t -= delta
+	if boss_banner_t <= 0.0:
+		boss_banner_t = 0.25
+		_update_boss_banner()
+
+
+func _boss_age() -> float:
+	return (Time.get_ticks_msec() - boss_at_ms) / 1000.0
+
+
+func _poll_boss() -> void:
+	var r: Dictionary = await api.get_json("/boss")
+	if not r.get("ok", false):
+		boss_poll = 20.0
+		return
+	if r.has("monsters"):
+		boss_book = r["monsters"]
+	if r.has("bestiary"):
+		bestiary = r["bestiary"]
+	if r.has("log"):
+		boss_log = r["log"]
+	on_boss_view(r)
+	if r.get("reward") != null and typeof(r["reward"]) == TYPE_DICTIONARY:
+		show_boss_reward(r["reward"])
+
+
+func on_boss_view(v: Dictionary) -> void:
+	var prev := str(boss.get("state", "idle"))
+	var prev_k := int(boss.get("k", -1))
+	boss = v
+	boss_at_ms = Time.get_ticks_msec()
+	var st := str(v.get("state", "idle"))
+	var k := int(v.get("k", -1))
+	var nm := str(v.get("name", "monster"))
+	world.set_boss(v, str(profile.get("username", "")))
+	# when to ask again
+	match st:
+		"countdown":
+			boss_poll = clampf(float(v.get("spawn_in", 5)) + 0.5, 0.5, 6.0)
+		"live":
+			boss_poll = 2.0 if current == "boss" else 4.0
+		"won", "escaped":
+			boss_poll = 12.0
+		_:
+			var nxt: Dictionary = v.get("next", {})
+			boss_poll = clampf(float(nxt.get("in_s", 30)) + 0.5, 1.0, 30.0)
+	# warnings: once per event
+	if st == "countdown" and not boss_heard.has("%d:c" % k):
+		boss_heard["%d:c" % k] = true
+		play("horn")
+		vibrate_pattern("level")
+		toast("A %s IS COMING!  Meet in the town square." % nm.to_upper(), Color("#ffd36b"))
+		log_msg("Garrick: %s Trick: %s" % [nm + " incoming!", str(v.get("trick", ""))], Color("#ffd36b"))
+	if st == "live" and not boss_heard.has("%d:l" % k):
+		boss_heard["%d:l" % k] = true
+		play("roar")
+		vibrate(200)
+		if world.area == "town":
+			world.shake = maxf(world.shake, 0.5)
+		toast("THE %s IS HERE!  Tap FIGHT to join." % nm.to_upper(), UI.RED)
+		if current == "boss" or (world.area == "town" and current == ""):
+			audio.set_area("boss")
+	if st in ["won", "escaped"] and prev == "live" and prev_k == k and not boss_heard.has("%d:e" % k):
+		boss_heard["%d:e" % k] = true
+		play("victory" if st == "won" else "escape")
+		if st == "won":
+			log_msg("The %s is defeated! %d miners fought it." % [nm, int(v.get("fighters", 0))], UI.GOLD)
+		else:
+			log_msg("The %s got away... it will be back." % nm, UI.MUTED)
+		if world.area == "town":
+			audio.set_area("town")
+	if current == "boss" and screens.has("boss"):
+		screens["boss"].on_view(v)
+	_update_boss_banner()
+
+
+func _update_boss_banner() -> void:
+	if boss_banner == null:
+		return
+	var st := str(boss.get("state", "idle"))
+	var age := _boss_age()
+	var nm := str(boss.get("name", "")).to_upper()
+	var show := false
+	match st:
+		"countdown":
+			var left := maxf(0.0, float(boss.get("spawn_in", 0)) - age)
+			boss_banner_label.text = "%s arrives in %d:%02d" % [nm, int(left) / 60, int(left) % 60]
+			boss_banner_btn.text = "GO"
+			show = true
+			var k := int(boss.get("k", -1))
+			if left <= 60.0 and left > 50.0 and not boss_heard.has("%d:60" % k):
+				boss_heard["%d:60" % k] = true
+				play("chime")
+				log_msg("One minute until the %s arrives!" % str(boss.get("name", "monster")), Color("#ffd36b"))
+			if left <= 10.0 and left > 0.5 and not boss_heard.has("%d:10" % k):
+				boss_heard["%d:10" % k] = true
+				play("horn", 1.25)
+			# the banner glows faster as it gets close
+			var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 1000.0 * (2.0 + 8.0 * (1.0 - minf(1.0, left / 60.0))))
+			boss_banner.modulate = Color(1, 1, 1).lerp(Color(1.25, 1.1, 1.0), pulse)
+		"live":
+			var hp := float(boss.get("hp", 0))
+			var mx := maxf(1.0, float(boss.get("max_hp", 1)))
+			var left2 := maxf(0.0, float(boss.get("time_left", 0)) - age)
+			boss_banner_label.text = "%s  %d%%  -  %d fighting  -  %d:%02d" % [nm, int(ceil(100.0 * hp / mx)), int(boss.get("fighting_now", 0)), int(left2) / 60, int(left2) % 60]
+			boss_banner_btn.text = "FIGHT"
+			boss_banner.modulate = Color.WHITE
+			show = true
+		"won", "escaped":
+			show = age < 25.0
+			boss_banner_label.text = ("%s DEFEATED!" % nm) if st == "won" else ("%s GOT AWAY" % nm)
+			boss_banner_btn.text = "SEE"
+			boss_banner.modulate = Color.WHITE
+	boss_banner.visible = show and layout != null and layout.visible
+	boss_banner_btn.visible = current != "boss"
+
+
+func open_boss() -> void:
+	close_panel()
+	_mark_nav("town")
+	pending_place = "boss"
+	if world.area != "town":
+		world.show_area("town")
+	open_panel("boss")
+
+
+func show_boss_reward(rw: Dictionary) -> void:
+	var key := "%s:%s" % [str(rw.get("k", "")), str(rw.get("monster", ""))]
+	if boss_rewards_seen.has(key):
+		return
+	boss_rewards_seen[key] = true
+	# let the monster fall (or flee) before the loot screen covers it
+	var m = world.monster
+	if world.area == "town" and m != null and is_instance_valid(m) and m.dead:
+		await get_tree().create_timer(3.6).timeout
+	refresh_profile()
+	_poll_boss_book()
+	var won: bool = not rw.get("escaped", false)
+	if not won:
+		# it got away: a small consolation, told quietly (no screen in the way)
+		var bits := []
+		var ore0: Dictionary = rw.get("ore", {})
+		for k in ore0.keys():
+			bits.append("%s %s" % [UI.n(ore0[k]), UI.ore_name(str(k)).to_lower()])
+		var line := "The %s got away. You keep %s and %d xp." % [str(rw.get("name", "monster")), ", ".join(PackedStringArray(bits)), int(rw.get("xp", 0))]
+		toast(line, UI.MUTED)
+		log_msg(line, UI.MUTED)
+		return
+	var v := _show_overlay()
+	var card := UI.add_card(v, "dark")
+	UI.add_label(card, ("VICTORY!" if won else "IT GOT AWAY..."), 40, UI.GOLD if won else UI.MUTED, true)
+	UI.add_label(card, ("The %s is defeated." if won else "The %s escaped. You keep a little loot.") % str(rw.get("name", "monster")), 22, UI.WHITE, true)
+	UI.add_space(card, 6)
+	UI.add_label(card, "Your damage: %s  (%d%% of the fight)" % [UI.n(rw.get("damage", 0)), int(round(float(rw.get("share", 0)) * 100.0))], 22, UI.TEAL_L, true)
+	if rw.get("mvp", false):
+		UI.add_label(card, "CHAMPION OF THE SQUARE - most damage!", 22, UI.GOLD, true)
+	if rw.get("final_blow", false):
+		UI.add_label(card, "You landed the FINAL BLOW!", 22, UI.GOLD, true)
+	var row := UI.add_row(card, 8)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	var ore: Dictionary = rw.get("ore", {})
+	for k in ore.keys():
+		UI.add_icon(row, UI.ORE_ICONS.get(str(k), "coal"), 34)
+		UI.add_label(row, "+%s" % UI.n(ore[k]), 24, UI.WHITE)
+	UI.add_label(card, "+%s xp" % UI.n(rw.get("xp", 0)), 24, Color("#9be8ff"), true)
+	if rw.get("gem") != null:
+		UI.add_label(card, "+1 %s!" % str(rw["gem"]).to_upper(), 24, UI.GOLD, true)
+	for b in rw.get("badges", []):
+		UI.add_label(card, "BADGE: %s" % BADGE_NAMES.get(str(b), str(b)), 22, UI.GOLD, true)
+	UI.add_space(card, 8)
+	var ok := UI.add_button(card, "HOORAY!" if won else "NEXT TIME", "amber" if won else "stone", 70, 26)
+	ok.pressed.connect(_close_overlay)
+	if won:
+		play("rare")
+		vibrate_pattern("level")
+		if world.area == "town":
+			world.level_up_fx(int(profile.get("level", 1)))
+
+
+func _poll_boss_book() -> void:
+	var r: Dictionary = await api.get_json("/boss")
+	if r.get("ok", false):
+		bestiary = r.get("bestiary", bestiary)
+		boss_log = r.get("log", boss_log)

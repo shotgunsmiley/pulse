@@ -15,7 +15,7 @@ func init(m) -> void:
 	M = m
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 	UI.add_title(self, "THE NOTICE BOARD", "")
-	tabs = UI.add_tabs(self, ["quests", "leaders", "land", "economy"], ["QUESTS", "LEADERS", "CREW LAND", "ECONOMY"], _set_tab)
+	tabs = UI.add_tabs(self, ["quests", "monsters", "leaders", "land", "economy"], ["QUESTS", "MONSTERS", "LEADERS", "CREW LAND", "ECONOMY"], _set_tab)
 	body = UI.add_scroll(self)
 
 
@@ -38,6 +38,8 @@ func _set_tab(t: String) -> void:
 		await _leaders()
 	elif t == "land":
 		await _land()
+	elif t == "monsters":
+		await _monsters()
 	else:
 		await _economy()
 
@@ -160,3 +162,68 @@ func _economy() -> void:
 			UI.add_label(c2, "%s   %s%d   %s" % [when, "+" if amt > 0 else "", amt, str(x["why"]).replace("_", " ")], 18, UI.GREEN if amt > 0 else UI.RED)
 		if l["entries"].is_empty():
 			UI.add_label(c2, "No PLS movements yet.", 18, UI.MUTED)
+
+
+
+# v5.5: the monster notice - what is coming, how it went last time, and every monster's trick.
+func _monsters() -> void:
+	var r: Dictionary = await M.api.get_json("/boss")
+	if tab != "monsters":
+		return
+	UI.clear(body)
+	if not r.get("ok", false):
+		M.error_toast(r)
+		return
+	M.on_boss_view(r)
+	var top := UI.add_card(body, "gold")
+	var st := str(r.get("state", "idle"))
+	match st:
+		"countdown":
+			UI.add_label(top, "%s ARRIVES IN %s!" % [str(r["name"]).to_upper(), _mmss(float(r.get("spawn_in", 0)))], 24, UI.RED)
+		"live":
+			UI.add_label(top, "THE %s IS IN THE SQUARE!" % str(r["name"]).to_upper(), 24, UI.RED)
+			UI.add_label(top, "%d%% health left, %s to go." % [int(ceil(100.0 * float(r["hp"]) / maxf(1.0, float(r["max_hp"])))), _mmss(float(r.get("time_left", 0)))], 19)
+		_:
+			var nxt: Dictionary = r.get("next", {})
+			if not nxt.is_empty():
+				UI.add_label(top, "NEXT: %s in %s" % [str(nxt.get("name", "?")).to_upper(), _mmss(float(nxt.get("in_s", 0)))], 22, UI.GOLD)
+	UI.add_label(top, "A monster comes to town every 90 minutes. A horn sounds 3 minutes before. Everyone fights the same monster - each new fighter makes it tougher, but fighting together hits harder. Loot is ore, xp, gems and badges.", 16, UI.MUTED)
+	if st in ["countdown", "live"]:
+		var go_b := UI.add_button(top, "TO THE SQUARE!", "red", 60, 22)
+		go_b.pressed.connect(func(): M.open_boss())
+	var fights: Array = r.get("log", [])
+	if fights.size() > 0:
+		UI.add_label(body, "RECENT FIGHTS", 20, UI.AMBER)
+		for e in fights:
+			var c := UI.add_card(body, "dark")
+			var mk := str(e.get("monster", ""))
+			var nm := str(r.get("monsters", {}).get(mk, {}).get("name", mk))
+			UI.add_label(c, "%s - %s, %d fighters" % [nm, "defeated" if e.get("result") == "won" else "got away", int(e.get("fighters", 0))], 19, UI.GOLD if e.get("result") == "won" else UI.MUTED)
+			var names := []
+			for row in e.get("top", []):
+				names.append("%s %s" % [str(row.get("username", "?")), UI.n(row.get("dmg", 0))])
+			if names.size() > 0:
+				UI.add_label(c, "Top: " + ", ".join(PackedStringArray(names)), 16, UI.MUTED)
+	UI.add_label(body, "THE FIVE MONSTERS", 20, UI.AMBER)
+	var book: Dictionary = r.get("bestiary", {})
+	var mons: Dictionary = r.get("monsters", {})
+	for mk in ["golem", "wyrm", "spider", "wraith", "drake"]:
+		if not mons.has(mk):
+			continue
+		var m: Dictionary = mons[mk]
+		var c2 := UI.add_card(body, "parch")
+		UI.add_label(c2, str(m.get("name", mk)).to_upper(), 20, UI.INK)
+		UI.add_label(c2, str(m.get("trick", "")), 16, UI.INK)
+		var loot := []
+		for k in m.get("loot", {}).keys():
+			loot.append("%s %s" % [UI.n(m["loot"][k]), UI.ore_name(str(k)).to_lower()])
+		UI.add_label(c2, "Loot: about %s (more for big hitters, a quarter if it gets away)" % ", ".join(PackedStringArray(loot)), 15, UI.INK)
+		var b: Dictionary = book.get(mk, {})
+		UI.add_label(c2, ("You: %d defeated, best fight %s damage" % [int(b.get("kills", 0)), UI.n(b.get("best_dmg", 0))]) if not b.is_empty() else "You have not fought one yet.", 15, UI.INK)
+
+
+static func _mmss(s: float) -> String:
+	var t := int(s)
+	if t >= 3600:
+		return "%d:%02d:%02d" % [t / 3600, (t / 60) % 60, t % 60]
+	return "%d:%02d" % [t / 60, t % 60]

@@ -10,6 +10,8 @@ uniform float tex_scale = 1.6;      // tiles per metre
 uniform float snow = 0.0;           // 0..1, winter coverage on upward faces
 uniform float wind = 1.0;
 uniform bool is_hero = false;
+uniform float flash = 0.0;          // v5.5: monsters flash white when hit
+uniform vec3 tint = vec3(1.0);      // v5.5: stone skin, rage, etc.
 
 varying vec3 obj_pos;
 varying vec3 obj_nrm;
@@ -56,5 +58,6 @@ void fragment() {
 		float s = clamp((up - 0.55) * 3.0, 0.0, 1.0) * snow;
 		base = mix(base, vec3(0.86, 0.9, 0.95), s);
 	}
-	ALBEDO = base;
+	ALBEDO = mix(base * tint, vec3(1.0), flash);
+	EMISSION = vec3(flash * 0.6);
 }

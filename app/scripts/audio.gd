@@ -5,6 +5,7 @@ extends Node
 const TRACKS := {
 	"town": ["music_town", "amb_town"], "mine": ["music_mine", "amb_cave"], "arena": ["music_arena", "amb_town"],
 	"lake": ["music_mine", "amb_lake"], "cabin": ["music_town", "amb_tavern"], "tavern": ["music_town", "amb_tavern"],
+	"boss": ["music_boss", "amb_town"],
 }
 const MUSIC_DB := -14.0
 const AMB_DB := -10.0
@@ -73,7 +74,8 @@ func _switch(pair: Array, is_music: bool, name: String, target_db: float) -> voi
 
 
 # The tavern jukebox: play the next tune (until you leave the area).
-const SONGS := [["music_town", "Market Morning"], ["music_mine", "Down the Deep Veins"], ["music_arena", "Steel and Sand"]]
+const SONGS := [["music_town", "Market Morning"], ["music_mine", "Down the Deep Veins"], ["music_arena", "Steel and Sand"],
+	["music_boss", "The Square Holds"]]
 var juke := -1
 
 func jukebox() -> String:

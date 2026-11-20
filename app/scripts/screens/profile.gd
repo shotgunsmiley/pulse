@@ -421,6 +421,17 @@ func _journal() -> void:
 		var n := int(vc.get(str(t), 0))
 		var medal := "gold" if n >= 2000 else ("silver" if n >= 500 else ("bronze" if n >= 100 else "-"))
 		UI.add_label(j, "  %s: %s cleared  (%s)" % [["", "Coal Seam", "Iron Vein", "Crystal Grotto", "Void Rift"][t], UI.n(n), medal], 17)
+	# v5.5: the monsters you have fought in the town square
+	UI.add_label(j, "BESTIARY (monsters of the square)", 18, UI.AMBER)
+	var book: Dictionary = p.get("bestiary", M.bestiary)
+	var names := {"golem": "Rock Golem", "wyrm": "Cave Wyrm", "spider": "Crystal Spider", "wraith": "Void Wraith", "drake": "Ember Drake"}
+	for mk in ["golem", "wyrm", "spider", "wraith", "drake"]:
+		var b: Dictionary = book.get(mk, {})
+		var nm := str(M.boss_book.get(mk, {}).get("name", names[mk]))
+		if b.is_empty():
+			UI.add_label(j, "  ? ? ?", 17, UI.MUTED)
+		else:
+			UI.add_label(j, "  %s - %d defeated, %d got away, best fight %s damage" % [nm, int(b.get("kills", 0)), int(b.get("escapes", 0)), UI.n(b.get("best_dmg", 0))], 17, UI.TEAL_L if int(b.get("kills", 0)) > 0 else UI.WHITE)
 
 
 func _badges() -> void:

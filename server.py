@@ -6348,6 +6348,336 @@ POST_AUTH.update({'/luck/flip': h_flip2, '/luck/dice': h_dice2, '/luck/cavein/st
                   '/luck/chests/take': h_chests_take, '/luck/wheel': h_wheel, '/luck/wheel/free': h_wheel_free,
                   '/luck/seed': h_fair_seed})
 
+# ===========================================================================
+# v5.5 WORLD BOSSES - shared monster events in the town square
+# ===========================================================================
+# Every PULSE_BOSS_EVERY minutes (default 90) a monster comes to town. Three minutes
+# before, a countdown starts for everyone. Then every player can fight it with the
+# strike bar; its health is shared, so everyone's hits count toward the same kill.
+# Each of the 5 monsters has its own trick. Rewards are ore, xp, gems and badges -
+# never PLS. Bots are caught by the same timing checks as mining and deal no damage.
+VERSION = 5.5
+
+BOSS_EVERY = float(os.environ.get('PULSE_BOSS_EVERY', '90')) * 60
+BOSS_LEAD = float(os.environ.get('PULSE_BOSS_LEAD', '180'))
+BOSS_FIGHT = float(os.environ.get('PULSE_BOSS_FIGHT', '600'))
+BOSS_BASE_HP = 900
+BOSS_HP_PER_FIGHTER = 600
+BOSS_GAP = 0.6                  # seconds between a player's strikes
+BOSS_MIN_DMG = 10               # damage needed to share the loot
+
+MONSTERS = {
+    'golem': {'name': 'Rock Golem', 'hp': 1.2, 'speed': 0.70, 'zone': 0.22,
+              'trick': 'At 75%, 50% and 25% health it hardens for 12 seconds: only PERFECT hits get through.',
+              'loot': {'iron': 25, 'coal': 20}, 'say': 'The ground shakes. A Rock Golem lumbers toward town!'},
+    'wyrm': {'name': 'Cave Wyrm', 'hp': 1.0, 'speed': 0.80, 'zone': 0.20,
+             'trick': 'Every 40 seconds it burrows underground for 8 seconds. Wait for it to surface.',
+             'loot': {'coal': 40, 'iron': 12}, 'say': 'Something huge is tunnelling under the square. A Cave Wyrm!'},
+    'spider': {'name': 'Crystal Spider', 'hp': 0.8, 'speed': 1.05, 'zone': 0.18,
+               'trick': 'Fast and fragile: the marker races, but PERFECT hits do double damage.',
+               'loot': {'crystal': 10, 'iron': 10}, 'say': 'Glittering legs clatter out of the mine. A Crystal Spider!'},
+    'wraith': {'name': 'Void Wraith', 'hp': 0.9, 'speed': 0.90, 'zone': 0.16,
+               'trick': 'Every MISS feeds it: a missed strike heals it a little.',
+               'loot': {'void': 6, 'crystal': 4}, 'say': 'The light goes cold. A Void Wraith drifts over the rooftops!'},
+    'drake': {'name': 'Ember Drake', 'hp': 1.4, 'speed': 0.85, 'zone': 0.20,
+              'trick': 'Every 30 seconds it raises a fire shield for 10 seconds (half damage). Below 20% it is enraged and takes 50% more.',
+              'loot': {'crystal': 8, 'void': 4, 'iron': 15}, 'say': 'Smoke on the horizon. An Ember Drake is coming!'},
+}
+MONSTER_ORDER = ['golem', 'wyrm', 'spider', 'wraith', 'drake']
+for _m, _v in MONSTERS.items():
+    BADGE_INFO['slay_' + _m] = {'name': '%s Slayer' % _v['name'], 'desc': 'Helped bring down a %s' % _v['name']}
+BADGE_INFO['monster_hunter'] = {'name': 'Monster Hunter', 'desc': 'Helped defeat all five monsters'}
+BADGE_INFO['boss_mvp'] = {'name': 'Champion of the Square', 'desc': 'Dealt the most damage in a monster fight'}
+BADGE_INFO['final_blow'] = {'name': 'Final Blow', 'desc': 'Landed the killing strike on a monster'}
+
+
+def _event_index(t):
+    """Event k spawns at k * BOSS_EVERY (seconds since the epoch)."""
+    return int(t // BOSS_EVERY)
+
+
+def _monster_for(k):
+    return MONSTER_ORDER[_seed('boss', k) % len(MONSTER_ORDER)]
+
+
+def boss_now():
+    """The current shared event, created or finished lazily on any request."""
+    B = DB.setdefault('boss', {})
+    t = now()
+    forced = B.get('forced')
+    if forced and t >= forced['spawn_t'] - BOSS_LEAD:
+        k, mon, spawn = forced['k'], forced['monster'], forced['spawn_t']
+    else:
+        k = _event_index(t + BOSS_LEAD)            # the event whose countdown may have started
+        spawn = k * BOSS_EVERY
+        mon = _monster_for(k)
+    ev = B.get('ev')
+    if not ev or ev['k'] != k:
+        if ev and ev['state'] == 'live':
+            _boss_finish(ev, escaped=True)
+        if t < spawn - BOSS_LEAD or t >= spawn + BOSS_FIGHT:
+            return ev if ev and ev['state'] in ('won', 'escaped') and t < ev['end_t'] + 300 else None
+        ev = B['ev'] = {'k': k, 'monster': mon, 'spawn_t': spawn, 'end_t': spawn + BOSS_FIGHT, 'hp': 0, 'max_hp': 0,
+                        'dmg': {}, 'last': {}, 'state': 'countdown', 'last_hit': None, 'announced': False, 'crossed': []}
+        sys_msg('%s It arrives in %d minutes - meet in the town square!' % (MONSTERS[mon]['say'], int(BOSS_LEAD // 60) or 1))
+    if ev['state'] == 'countdown' and t >= ev['spawn_t']:
+        ev['state'] = 'live'
+        ev['max_hp'] = ev['hp'] = int(BOSS_BASE_HP * MONSTERS[ev['monster']]['hp'])
+        sys_msg('The %s is here! Everyone to the square!' % MONSTERS[ev['monster']]['name'])
+    if ev['state'] == 'live' and t >= ev['end_t']:
+        _boss_finish(ev, escaped=True)
+    return ev
+
+
+def boss_tricks(ev, t=None):
+    """What the monster is doing right now (all decided by the clock, the same for everyone)."""
+    t = now() if t is None else t
+    m = ev['monster']
+    age = t - ev['spawn_t']
+    out = {}
+    if m == 'golem':
+        until = max([c + 12 for c in ev.get('crossed_t', [])] or [0])
+        if t < until:
+            out['hardened'] = round(until - t, 1)
+    elif m == 'wyrm':
+        cyc = age % 40
+        if age > 20 and cyc < 8:
+            out['burrowed'] = round(8 - cyc, 1)
+    elif m == 'drake':
+        cyc = age % 30
+        if age > 15 and cyc < 10:
+            out['shield'] = round(10 - cyc, 1)
+        if ev['max_hp'] and ev['hp'] < ev['max_hp'] * 0.2:
+            out['enraged'] = True
+    return out
+
+
+def _fighters_recent(ev, t):
+    return sum(1 for uid, lt in ev['last'].items() if t - lt < 20)
+
+
+def _boss_reward(u, ev, share, mvp, final, escaped):
+    x = X(u)
+    m = ev['monster']
+    mult = 0.25 if escaped else (0.6 + 1.4 * min(1.0, share * 3))
+    got = {}
+    for ore, n in MONSTERS[m]['loot'].items():
+        q = max(1, int(round(n * mult)))
+        u['ore'][ore] += q
+        got[ore] = q
+    xp = int((20 if escaped else 60) + (50 if final else 0) + (40 if mvp else 0))
+    u['xp'] += xp
+    gem = None
+    if not escaped and (mvp or random.random() < 0.25):
+        gem = random.choice(['amber', 'garnet', 'sapphire'] if mvp else ['amber', 'garnet'])
+        u['gems'][gem] += 1
+    badges = []
+    if not escaped:
+        for bid in ['slay_' + m] + (['boss_mvp'] if mvp else []) + (['final_blow'] if final else []):
+            if give_badge(u, bid):
+                badges.append(bid)
+        if all('slay_' + k in u['badges'] for k in MONSTER_ORDER) and give_badge(u, 'monster_hunter'):
+            badges.append('monster_hunter')
+    b = x.setdefault('bestiary', {}).setdefault(m, {'kills': 0, 'fights': 0, 'best_dmg': 0, 'escapes': 0})
+    b['fights'] += 1
+    b['kills' if not escaped else 'escapes'] += 1
+    b['best_dmg'] = max(b['best_dmg'], ev['dmg'].get(u['uid'], 0))
+    x['boss_reward'] = {'monster': m, 'name': MONSTERS[m]['name'], 'escaped': escaped, 'ore': got, 'xp': xp, 'gem': gem,
+                        'badges': badges, 'damage': ev['dmg'].get(u['uid'], 0), 'share': round(share, 3), 'mvp': mvp,
+                        'final_blow': final, 'k': ev['k']}
+
+
+def _boss_finish(ev, escaped):
+    if ev['state'] not in ('live', 'countdown'):
+        return
+    ev['state'] = 'escaped' if escaped else 'won'
+    total = sum(ev['dmg'].values()) or 1
+    ranked = sorted(ev['dmg'].items(), key=lambda kv: -kv[1])
+    mvp_uid = ranked[0][0] if ranked and not escaped else None
+    for uid, d in ranked:
+        u = DB['users'].get(uid)
+        if u and d >= BOSS_MIN_DMG:
+            _boss_reward(u, ev, d / float(total), uid == mvp_uid, uid == ev.get('last_hit') and not escaped, escaped)
+    name = MONSTERS[ev['monster']]['name']
+    if escaped:
+        sys_msg('The %s got away... it will be back. Fighters keep a little loot.' % name)
+    else:
+        top = DB['users'][mvp_uid]['username'] if mvp_uid in DB['users'] else '?'
+        fb = DB['users'].get(ev.get('last_hit') or '', {}).get('username', '?')
+        sys_msg('The %s is defeated! %d miners fought. Most damage: %s. Final blow: %s.' % (name, len(ranked), top, fb))
+    log = DB.setdefault('boss_log', [])
+    log.append({'k': ev['k'], 'monster': ev['monster'], 'result': ev['state'], 'fighters': len(ranked), 't': int(now()),
+                'top': [{'username': DB['users'][u]['username'], 'dmg': d} for u, d in ranked[:3] if u in DB['users']]})
+    DB['boss_log'] = log[-20:]
+    DB.get('boss', {}).pop('forced', None)
+
+
+def boss_view(u, ev):
+    t = now()
+    if ev is None:
+        k = _event_index(t + BOSS_LEAD) + 1
+        nxt = {'monster': _monster_for(k), 'in_s': int(k * BOSS_EVERY - BOSS_LEAD - t)}
+        forced = DB.get('boss', {}).get('forced')
+        if forced:
+            nxt = {'monster': forced['monster'], 'in_s': int(forced['spawn_t'] - BOSS_LEAD - t)}
+        return {'state': 'idle', 'next': dict(nxt, name=MONSTERS[nxt['monster']]['name'])}
+    m = MONSTERS[ev['monster']]
+    ranked = sorted(ev['dmg'].items(), key=lambda kv: -kv[1])
+    me = ev['dmg'].get(u['uid'], 0) if u else 0
+    out = {'state': ev['state'], 'k': ev['k'], 'monster': ev['monster'], 'name': m['name'], 'trick': m['trick'],
+           'spawn_in': max(0, int(ev['spawn_t'] - t)), 'time_left': max(0, int(ev['end_t'] - t)),
+           'hp': ev['hp'], 'max_hp': ev['max_hp'], 'fighters': len(ev['dmg']), 'fighting_now': _fighters_recent(ev, t),
+           'top': [{'username': DB['users'][uid]['username'], 'dmg': d, 'look': _look(uid)} for uid, d in ranked[:6] if uid in DB['users']],
+           'me': {'dmg': me, 'rank': next((i + 1 for i, (uid, _) in enumerate(ranked) if u and uid == u['uid']), None)},
+           'tricks': boss_tricks(ev, t) if ev['state'] == 'live' else {}}
+    if ev['state'] in ('won', 'escaped'):
+        k = _event_index(t + BOSS_LEAD) + 1
+        out['next'] = {'monster': _monster_for(k), 'name': MONSTERS[_monster_for(k)]['name'], 'in_s': int(k * BOSS_EVERY - BOSS_LEAD - t)}
+    return out
+
+
+def _boss_mark():
+    ev = DB.get('boss', {}).get('ev') or {}
+    return (ev.get('k'), ev.get('state'), bool(DB.get('boss', {}).get('forced')))
+
+
+def h_boss(u, q):
+    """Everyone polls this, so it only writes to the database when something changed."""
+    before = _boss_mark()
+    ev = boss_now()
+    out = boss_view(u, ev)
+    rw = X(u).pop('boss_reward', None) if u else None
+    if rw:
+        out['reward'] = rw
+    out['monsters'] = {k: {'name': v['name'], 'trick': v['trick'], 'loot': v['loot']} for k, v in MONSTERS.items()}
+    out['bestiary'] = X(u).get('bestiary', {}) if u else {}
+    out['log'] = list(reversed(DB.get('boss_log', [])[-5:]))
+    if rw or _boss_mark() != before:
+        save()
+    return dict(out, ok=True)
+
+
+def h_boss_start(u, b):
+    ev = boss_now()
+    if not ev or ev['state'] != 'live':
+        raise ApiError('no_boss', 'There is no monster to fight right now.')
+    m = MONSTERS[ev['monster']]
+    rng = random.Random(secrets.randbits(48))
+    zone = m['zone'] + gear_effect(u, 'gauntlets')
+    center = round(rng.uniform(zone / 2 + 0.05, 1 - zone / 2 - 0.05), 4)
+    ch = {'boss': ev['k'], 'speed': round(m['speed'] * (1 - gear_effect(u, 'visor')), 4), 'offset': round(rng.random(), 4),
+          'zone_center': center, 'zone_width': round(zone, 4)}
+    for k in [k for k, v in CHALLENGES.items() if v['uid'] == u['uid'] and v['mode'] == 'boss']:
+        del CHALLENGES[k]
+    cid = 'c' + secrets.token_hex(6)
+    CHALLENGES[cid] = {'uid': u['uid'], 'mode': 'boss', 'game': 'boss', 'challenge': ch, 'issued': now(), 'extra': {}}
+    act(u, 'boss')
+    return {'ok': True, 'id': cid, 'challenge': ch, 'boss': boss_view(u, ev)}
+
+
+def h_boss_strike(u, b):
+    c, elapsed = take_challenge(u, b.get('id'), 'boss')
+    ch = c['challenge']
+    tap = to_int(b.get('tap_ms'), -1)
+    if elapsed > CHALLENGE_TTL * 1000:
+        raise ApiError('too_slow', 'The strike window closed. Swing again.')
+    if tap < 150 or tap > elapsed + 150:
+        raise ApiError('bad_timing', 'Strike timing did not match the server clock.')
+    if now() - u.get('last_boss_strike', 0) < BOSS_GAP:
+        raise ApiError('too_fast', 'Catch your breath between strikes.', 429)
+    u['last_boss_strike'] = now()
+    ev = boss_now()
+    if not ev or ev['state'] != 'live' or ev['k'] != ch['boss']:
+        raise ApiError('no_boss', 'The fight is over.')
+    d = abs(marker_pos(ch, tap) - ch['zone_center'])
+    half = ch['zone_width'] / 2
+    q = 'perfect' if d <= half * 0.3 else 'great' if d <= half * 0.65 else 'good' if d <= half else 'miss'
+    why = hm_record(u, ideal_error_ms(ch, tap), q)
+    if why:
+        flag_bot(u, why)
+    tricks = boss_tricks(ev)
+    m = ev['monster']
+    dmg = 0
+    note = ''
+    if q != 'miss' and not u.get('flagged'):
+        dmg = {'perfect': 6, 'great': 4, 'good': 2}[q] + gear_effect(u, 'pickaxe')
+        if tricks.get('hardened') and q != 'perfect':
+            dmg, note = 0, 'CLANG! Its stone skin is hard - only perfect hits get through.'
+        if tricks.get('burrowed'):
+            dmg, note = 0, 'It is underground! Wait for it to surface.'
+        if m == 'spider' and q == 'perfect':
+            dmg *= 2
+        if tricks.get('shield'):
+            dmg, note = int(math.ceil(dmg / 2.0)), 'The fire shield soaks up half the blow.'
+        if tricks.get('enraged'):
+            dmg = int(dmg * 1.5)
+        n = _fighters_recent(ev, now()) + (0 if u['uid'] in ev['last'] and now() - ev['last'][u['uid']] < 20 else 1)
+        dmg = int(round(dmg * min(1.5, 1 + 0.05 * (n - 1))))          # strength in numbers
+    elif q == 'miss' and m == 'wraith':
+        ev['hp'] = min(ev['max_hp'], ev['hp'] + 3)
+        note = 'The Wraith feeds on your miss.'
+    if u['uid'] not in ev['dmg']:
+        ev['dmg'][u['uid']] = 0
+        if len(ev['dmg']) > 1:                     # every new fighter makes it tougher
+            ev['max_hp'] += BOSS_HP_PER_FIGHTER
+            ev['hp'] += BOSS_HP_PER_FIGHTER
+    ev['last'][u['uid']] = now()
+    before = ev['hp']
+    if dmg > 0:
+        ev['hp'] = max(0, ev['hp'] - dmg)
+        ev['dmg'][u['uid']] += dmg
+        if m == 'golem':
+            for cut in (0.75, 0.5, 0.25):
+                if before > ev['max_hp'] * cut >= ev['hp'] and cut not in ev['crossed']:
+                    ev['crossed'].append(cut)
+                    ev.setdefault('crossed_t', []).append(now())
+                    note = 'The Golem\'s skin turns to granite!'
+    killed = False
+    if ev['hp'] <= 0 and ev['state'] == 'live':
+        ev['last_hit'] = u['uid']
+        _boss_finish(ev, escaped=False)
+        killed = True
+    xp = 1 if dmg > 0 else 0
+    u['xp'] += xp
+    save()
+    out = {'ok': True, 'quality': q, 'damage': dmg, 'note': note, 'killed': killed, 'marker': round(marker_pos(ch, tap), 4),
+           'boss': boss_view(u, ev), 'xp': u['xp'], 'flagged': u.get('flagged', False)}
+    if killed:
+        out['reward'] = X(u).pop('boss_reward', None)
+    return out
+
+
+def h_admin_boss(q):
+    """Admin: bring a monster now. /admin/boss?spawn=drake&lead=20"""
+    mon = (q.get('spawn') or [''])[0]
+    if mon not in MONSTERS:
+        return {'ok': True, 'monsters': MONSTER_ORDER, 'boss': DB.get('boss', {}).get('ev')}
+    lead = max(5, min(600, to_int((q.get('lead') or ['30'])[0], 30)))
+    B = DB.setdefault('boss', {})
+    ev = B.get('ev')
+    if ev and ev['state'] == 'live':
+        _boss_finish(ev, escaped=True)
+    k = 10 ** 9 + int(now())                    # a one-off event number
+    B['forced'] = {'k': k, 'monster': mon, 'spawn_t': now() + lead}
+    B.pop('ev', None)
+    ev = boss_now()
+    save()
+    return {'ok': True, 'forced': B['forced'], 'state': ev['state'] if ev else None}
+
+
+# Profile shows the bestiary in the journal.
+_v54_profile_view = profile_view
+def profile_view(u, full=True):
+    out = _v54_profile_view(u, full)
+    if full:
+        out['bestiary'] = X(u).get('bestiary', {})
+    return out
+
+
+GET_OPTIONAL.update({'/boss': h_boss})
+POST_AUTH.update({'/boss/start': h_boss_start, '/boss/strike': h_boss_strike})
+GET_ADMIN.update({'/admin/boss': h_admin_boss})
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ signal photo_tapped
 const MD = preload("res://scripts/model_data.gd")
 const MB = preload("res://scripts/mesh_builder.gd")
 const HeroScript = preload("res://scripts/hero.gd")
+const MonsterScript = preload("res://scripts/monster.gd")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const WATER_SHADER = preload("res://shaders/water.gdshader")
 const CLOUDS = preload("res://textures/clouds.png")
@@ -112,6 +113,22 @@ var rod: MeshInstance3D = null
 var cinematic := false
 var trophies_root: Node3D = null
 var debug_hour := -1.0     # set >= 0 to force a time of day (screenshots)
+# v5.5 world bosses: the monster comes to the east side of the square
+const BOSS_POS := Vector3(5.6, 0, 1.6)
+const BOSS_FACE := Vector3(3.0, 0, 2.8)     # it faces the monument side, where the fighters gather
+const FIGHTER_ANGLES := [50.0, -50.0, 98.0, -98.0, 145.0]
+var boss_state := ""        # "", countdown, live, won, escaped
+var boss_kind := ""
+var boss_k := -1
+var boss_v := {}
+var boss_spawn_at := 0.0    # seconds (ticks clock) when the countdown ends
+var monster = null          # monster.gd instance
+var boss_circle: Node3D = null
+var boss_circle_label: Label3D = null
+var boss_tag: Label3D = null
+var fighters := {}          # username -> {"n": hero, "next": float}
+var boss_focus := false     # the fight panel is open: frame the monster
+var my_name := ""
 
 
 func _ready() -> void:
@@ -168,6 +185,11 @@ func show_area(area_name: String, opts: Dictionary = {}) -> void:
 	birds.clear()
 	monument_light = null
 	hidden_fx = null
+	monster = null
+	boss_circle = null
+	boss_circle_label = null
+	boss_tag = null
+	fighters.clear()
 	water = null
 	bobber = null
 	line_mesh = null
@@ -329,6 +351,8 @@ func show_area(area_name: String, opts: Dictionary = {}) -> void:
 	_hold_rod(area_name == "lake")
 	if pet != null:
 		pet.position = hero.position + Vector3(0.8, 0, 0.8)
+	if town and boss_state != "":
+		_apply_boss("", false)
 
 
 func _vec(a: Array) -> Vector3:
@@ -1121,6 +1145,10 @@ func _cam_target() -> Vector3:
 
 
 func _cam_raw() -> Vector3:
+	if _boss_cam():
+		var d := Vector3(hero.position.x - BOSS_POS.x, 0, hero.position.z - BOSS_POS.z).normalized()
+		var side := d.cross(Vector3.UP)
+		return hero.position + d * 5.6 + side * 2.6 + Vector3(0, 5.2 if low_frame else 3.6, 0)
 	var back := Vector3(sin(cam_yaw), 0, cos(cam_yaw))
 	if low_frame:
 		var y := cam_yaw + 0.8
@@ -1130,6 +1158,9 @@ func _cam_raw() -> Vector3:
 
 
 func _look_point() -> Vector3:
+	if _boss_cam():
+		# aim low so the monster sits in the half of the screen above the fight panel
+		return BOSS_POS.lerp(hero.position, 0.2) + Vector3(0, -0.4 if low_frame else 1.6, 0)
 	var fwd := Vector3(-sin(cam_yaw), 0, -cos(cam_yaw))
 	if low_frame:
 		return hero.position + fwd * 1.1 + Vector3(0, -1.5, 0)
@@ -1164,6 +1195,8 @@ func _process(delta: float) -> void:
 	for npc in npcs:
 		if is_instance_valid(npc["n"]):
 			_npc_step(npc, delta)
+	if area == "town" and boss_state != "":
+		_boss_step(delta, t)
 	for b in birds:
 		var n: Node3D = b["n"]
 		if not is_instance_valid(n):
@@ -1245,6 +1278,8 @@ func _tap(pos: Vector2) -> void:
 	if best != null:
 		if best["kind"] == "place":
 			place_tapped.emit(best["id"])
+		elif best["kind"] == "boss":
+			place_tapped.emit("boss")
 		else:
 			vein_tapped.emit(best["id"])
 		return
@@ -1597,3 +1632,316 @@ func _shooting_star() -> void:
 	tw.tween_property(star, "position", to, 1.1)
 	tw.parallel().tween_property(m, "albedo_color:a", 0.0, 1.1).set_delay(0.5)
 	tw.tween_callback(star.queue_free)
+
+
+
+# ===================================================================== v5.5 WORLD BOSSES
+# main.gd polls /boss and hands every answer to set_boss(). The square shows a glowing
+# summoning circle during the 3-minute countdown, then the monster with the players who
+# are fighting it (the top six by damage) swinging around it.
+
+func _boss_cam() -> bool:
+	return boss_focus and area == "town" and boss_state in ["countdown", "live", "won", "escaped"]
+
+
+func boss_reach() -> float:
+	return float(MonsterScript.REACH.get(boss_kind, 2.6))
+
+
+func boss_spot() -> Dictionary:
+	var d := (BOSS_FACE - BOSS_POS).normalized()
+	var p := BOSS_POS + d * boss_reach()
+	return {"p": [p.x, 0, p.z], "look": [BOSS_POS.x, 0, BOSS_POS.z]}
+
+
+func set_boss(v: Dictionary, me: String = "") -> void:
+	if me != "":
+		my_name = me
+	var prev := boss_state
+	var st := str(v.get("state", "idle"))
+	boss_v = v
+	if st == "idle":
+		st = ""
+	if st == "countdown":
+		boss_spawn_at = Time.get_ticks_msec() / 1000.0 + float(v.get("spawn_in", 0))
+	var k := int(v.get("k", -1))
+	if k != boss_k and prev != "" and st != "":
+		prev = ""          # a different event: nothing to animate from
+	boss_state = st
+	boss_kind = str(v.get("monster", ""))
+	boss_k = k
+	if area == "town":
+		_apply_boss(prev, true)
+
+
+func _apply_boss(prev: String, animate: bool) -> void:
+	# the monster (or its circle) can be tapped like a building to join the fight
+	for p in pickables.duplicate():
+		if p["kind"] == "boss":
+			pickables.erase(p)
+	if boss_state in ["countdown", "live"]:
+		pickables.append({"pos": BOSS_POS + Vector3(0, 1.6, 0), "kind": "boss", "id": "boss"})
+	match boss_state:
+		"countdown":
+			_clear_monster()
+			if boss_circle == null:
+				_make_circle()
+		"live":
+			if boss_circle != null:
+				_burst(BOSS_POS + Vector3(0, 0.4, 0), Color("#ff9a5a"), 40, 5.0, 0.1, true, 1.0)
+				boss_circle.queue_free()
+				boss_circle = null
+				boss_circle_label = null
+			if monster != null and (not is_instance_valid(monster) or monster.kind != boss_kind or monster.dead):
+				_clear_monster()
+			if monster == null:
+				_make_monster(animate and prev == "countdown")
+			var hp := float(boss_v.get("hp", 1))
+			var mx := maxf(1.0, float(boss_v.get("max_hp", 1)))
+			monster.set_tricks(boss_v.get("tricks", {}), hp / mx)
+			_update_tag()
+			_update_fighters()
+		"won", "escaped":
+			if boss_circle != null:
+				boss_circle.queue_free()
+				boss_circle = null
+			if monster != null and is_instance_valid(monster) and not monster.dead:
+				if animate and prev == "live":
+					monster.gone.connect(_on_monster_gone)
+					if boss_state == "won":
+						monster.die()
+						_boss_fireworks()
+						for f in fighters.values():
+							if is_instance_valid(f["n"]):
+								f["n"].cheer()
+					else:
+						monster.flee()
+				else:
+					_clear_monster()
+			if boss_tag != null:
+				boss_tag.text = "%s - %s" % [str(boss_v.get("name", "")), "DEFEATED!" if boss_state == "won" else "GOT AWAY"]
+		_:
+			_clear_monster()
+			if boss_circle != null:
+				boss_circle.queue_free()
+				boss_circle = null
+				boss_circle_label = null
+
+
+func _clear_monster() -> void:
+	if monster != null and is_instance_valid(monster):
+		monster.queue_free()
+	monster = null
+	if boss_tag != null and is_instance_valid(boss_tag):
+		boss_tag.queue_free()
+	boss_tag = null
+	for f in fighters.values():
+		if is_instance_valid(f["n"]):
+			f["n"].queue_free()
+	fighters.clear()
+
+
+func _on_monster_gone() -> void:
+	await get_tree().create_timer(7.0).timeout
+	if boss_state != "live" and boss_state != "countdown":
+		_clear_monster()
+
+
+func _make_circle() -> void:
+	boss_circle = Node3D.new()
+	boss_circle.position = BOSS_POS
+	area_root.add_child(boss_circle)
+	for r in [[1.9, 0.07, "#ff9a5a"], [1.35, 0.05, "#ffd36b"]]:
+		var ring := MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = float(r[0]) - float(r[1])
+		tm.outer_radius = float(r[0])
+		tm.rings = 28
+		tm.ring_segments = 4
+		var m := StandardMaterial3D.new()
+		m.albedo_color = Color(str(r[2]))
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		tm.material = m
+		ring.mesh = tm
+		ring.position.y = 0.05
+		ring.scale = Vector3(1, 0.3, 1)
+		ring.name = "ring"
+		boss_circle.add_child(ring)
+	# rune stones around the rim
+	for i in range(6):
+		var a := TAU * i / 6.0
+		var st := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.22, 0.12, 0.22)
+		var m2 := StandardMaterial3D.new()
+		m2.albedo_color = Color("#ffd36b")
+		m2.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		bm.material = m2
+		st.mesh = bm
+		st.position = Vector3(cos(a) * 1.62, 0.08, sin(a) * 1.62)
+		st.rotation.y = a
+		boss_circle.add_child(st)
+	var p := CPUParticles3D.new()
+	p.amount = 40
+	p.lifetime = 1.8
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_RING
+	p.emission_ring_axis = Vector3.UP
+	p.emission_ring_radius = 1.8
+	p.emission_ring_inner_radius = 1.2
+	p.emission_ring_height = 0.05
+	p.direction = Vector3.UP
+	p.spread = 8.0
+	p.gravity = Vector3(0, 1.2, 0)
+	p.initial_velocity_min = 0.4
+	p.initial_velocity_max = 1.0
+	var bm2 := BoxMesh.new()
+	bm2.size = Vector3(0.06, 0.06, 0.06)
+	var m3 := StandardMaterial3D.new()
+	m3.albedo_color = Color("#ff9a5a")
+	m3.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bm2.material = m3
+	p.mesh = bm2
+	boss_circle.add_child(p)
+	var l := OmniLight3D.new()
+	l.light_color = Color("#ff8a4a")
+	l.omni_range = 5.0
+	l.light_energy = 1.4
+	l.position = Vector3(0, 0.8, 0)
+	l.name = "glow"
+	boss_circle.add_child(l)
+	boss_circle_label = _label3d("", 30, Color("#ffd36b"))
+	boss_circle_label.position = Vector3(0, 2.4, 0)
+	boss_circle.add_child(boss_circle_label)
+
+
+func _label3d(text: String, size_px: int, color: Color) -> Label3D:
+	var l := Label3D.new()
+	l.text = text
+	l.font_size = size_px
+	l.pixel_size = 0.006
+	l.modulate = color
+	l.outline_size = 12
+	l.outline_modulate = Color(0, 0, 0, 0.9)
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.no_depth_test = true
+	l.render_priority = 4
+	return l
+
+
+func _make_monster(arrive: bool) -> void:
+	monster = MonsterScript.new()
+	area_root.add_child(monster)
+	monster.build(boss_kind)
+	monster.position = BOSS_POS
+	var d := BOSS_FACE - BOSS_POS
+	monster.rotation.y = atan2(d.x, d.z)
+	boss_tag = _label3d("", 26, Color("#ffd36b"))
+	boss_tag.position = BOSS_POS + Vector3(0, float(MonsterScript.HEIGHT.get(boss_kind, 3.5)) + 0.5, 0)
+	area_root.add_child(boss_tag)
+	if arrive:
+		monster.arrive()
+		shake = maxf(shake, 0.6)
+
+
+func _update_tag() -> void:
+	if boss_tag == null:
+		return
+	var hp := float(boss_v.get("hp", 0))
+	var mx := maxf(1.0, float(boss_v.get("max_hp", 1)))
+	var pct := int(ceil(100.0 * hp / mx))
+	var bars := int(round(10.0 * hp / mx))
+	boss_tag.text = "%s\n%s%s  %d%%" % [str(boss_v.get("name", "")).to_upper(), "|".repeat(bars), ".".repeat(10 - bars), pct]
+	var tr: Dictionary = boss_v.get("tricks", {})
+	boss_tag.modulate = Color("#d8e6f0") if tr.has("hardened") else (Color("#ff7a5a") if tr.has("enraged") else Color("#ffd36b"))
+
+
+func _update_fighters() -> void:
+	var want := []
+	for row in boss_v.get("top", []):
+		var nm := str(row.get("username", ""))
+		if nm != "" and nm != my_name and want.size() < FIGHTER_ANGLES.size():
+			want.append(row)
+	var keep := {}
+	for row in want:
+		keep[str(row["username"])] = true
+	for nm in fighters.keys():
+		if not keep.has(nm):
+			if is_instance_valid(fighters[nm]["n"]):
+				fighters[nm]["n"].queue_free()
+			fighters.erase(nm)
+	var base := (BOSS_FACE - BOSS_POS).normalized()
+	var i := 0
+	for row in want:
+		var nm := str(row["username"])
+		var ang := deg_to_rad(float(FIGHTER_ANGLES[i]))
+		var dir := base.rotated(Vector3.UP, ang)
+		var at := BOSS_POS + dir * (boss_reach() + 0.15)
+		if not fighters.has(nm):
+			var h = HeroScript.new()
+			area_root.add_child(h)
+			var look = row.get("look", {})
+			h.build(look if typeof(look) == TYPE_DICTIONARY else {}, "iron")
+			var tag := _label3d(nm, 18, Color("#9be8ff"))
+			tag.position = Vector3(0, 2.25, 0)
+			h.add_child(tag)
+			fighters[nm] = {"n": h, "next": randf_range(0.3, 1.6)}
+		var f: Dictionary = fighters[nm]
+		var hn: Node3D = f["n"]
+		hn.position = at
+		_face(BOSS_POS, hn)
+		i += 1
+
+
+func _boss_step(delta: float, t: float) -> void:
+	if boss_circle != null and is_instance_valid(boss_circle):
+		boss_circle.rotation.y += delta * 0.6
+		var left := maxf(0.0, boss_spawn_at - Time.get_ticks_msec() / 1000.0)
+		if boss_circle_label != null:
+			boss_circle_label.text = "%s\n%d:%02d" % [str(boss_v.get("name", "")).to_upper(), int(left) / 60, int(left) % 60]
+		var g := boss_circle.get_node_or_null("glow")
+		if g != null:
+			g.light_energy = 1.2 + 0.6 * sin(t * (3.0 + 6.0 * (1.0 - minf(1.0, left / 60.0))))
+	if boss_state == "live" and monster != null and is_instance_valid(monster) and not monster.dead:
+		var burrowed: bool = boss_v.get("tricks", {}).has("burrowed")
+		for nm in fighters.keys():
+			var f: Dictionary = fighters[nm]
+			f["next"] = float(f["next"]) - delta
+			if float(f["next"]) <= 0.0 and is_instance_valid(f["n"]):
+				f["next"] = randf_range(0.9, 2.2)
+				f["n"].swing()
+				if not burrowed:
+					monster.hit("good", 1, false)
+
+
+# A hit from this player (the panel calls this with the server's answer).
+func boss_hit(quality: String, dmg: int, note: String) -> void:
+	if monster == null or not is_instance_valid(monster):
+		return
+	monster.hit(quality, dmg)
+	var top := BOSS_POS + Vector3(randf_range(-0.5, 0.5), float(MonsterScript.HEIGHT.get(boss_kind, 3.0)) * 0.7, 0)
+	if dmg > 0:
+		var col: Color = {"perfect": Color("#ffd36b"), "great": Color("#7fe3d3"), "good": Color("#ffffff")}.get(quality, Color.WHITE)
+		float_text(top, "-%d" % dmg, col, 3 if quality == "perfect" else 2, 0.9, 1.0)
+		shake = maxf(shake, 0.08 if quality != "perfect" else 0.16)
+	elif quality == "miss":
+		float_text(top, "MISS", Color("#e64c4c"), 2, 0.6, 0.9)
+		if boss_kind == "wraith":
+			monster.heal_fx()
+			float_text(top + Vector3(0, 0.4, 0), "+3", Color("#c9a0ff"), 2, 0.7, 1.0)
+	else:
+		float_text(top, "BLOCKED" if note.find("underground") < 0 else "UNDERGROUND", Color("#d8e6f0"), 2, 0.6, 1.0)
+
+
+func _boss_fireworks() -> void:
+	var colors := [Color("#ffd36b"), Color("#7fe3d3"), Color("#ff8a6a"), Color("#b48cf0"), Color("#9be8ff")]
+	for i in range(9):
+		var a := TAU * i / 9.0
+		var start := BOSS_POS + Vector3(cos(a) * 2.5, 0.3, sin(a) * 2.5)
+		var top := start + Vector3(cos(a) * 1.0, randf_range(3.5, 5.5), sin(a) * 1.0)
+		var col: Color = colors[i % colors.size()]
+		var tw := create_tween()
+		tw.tween_interval(0.6 + i * 0.25)
+		tw.tween_callback(func():
+			_burst(top, col, 34, 4.5, 0.08, true, 1.3)
+			_burst(top, Color.WHITE, 10, 2.0, 0.05, true, 0.7))
+	shake = maxf(shake, 0.4)
