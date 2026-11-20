@@ -4372,9 +4372,42 @@ def _wrap_start(fn):
         return out
     return w
 
-h_pvp_play = _wrap_start(h_pvp_play)
-h_ghost_start = _wrap_start(h_ghost_start)
-h_koth_challenge = _wrap_start(h_koth_challenge)
+def _look(uid):
+    x = DB['users'].get(uid) or {}
+    return dict(x.get('appearance') or {})
+
+def _with_opponent(fn):
+    """v5.1: tell the phone who it is facing, so Quickdraw can show the right swordsman."""
+    def w(u, b):
+        out = fn(u, b)
+        m = DB['matches'].get(b.get('match_id') or '')
+        if m and u['uid'] in m['players']:
+            opp = [p for p in m['players'] if p != u['uid']][0]
+            out['opponent'] = {'username': DB['users'][opp]['username'], 'look': _look(opp)}
+        return out
+    return w
+
+def _ghost_look(fn):
+    def w(u, b):
+        out = fn(u, b)
+        of = DB['names'].get(str(b.get('username', '')).strip().lower())
+        if of and isinstance(out.get('ghost'), dict):
+            out['ghost']['look'] = _look(of)
+        return out
+    return w
+
+def _king_look(fn):
+    def w(u, b):
+        out = fn(u, b)
+        k = DB['koth'].get(b.get('game'))
+        if k and isinstance(out.get('throne'), dict):
+            out['throne']['king_look'] = _look(k['uid'])
+        return out
+    return w
+
+h_pvp_play = _with_opponent(_wrap_start(h_pvp_play))
+h_ghost_start = _ghost_look(_wrap_start(h_ghost_start))
+h_koth_challenge = _king_look(_wrap_start(h_koth_challenge))
 h_t_start = _wrap_start(h_t_start)
 
 def _wrap_submit(fn, practice=False):
@@ -4513,12 +4546,23 @@ def claim_bounties(u, game, score):
             x['state'] = 'open'
 
 _v5_h_koth_challenge = h_koth_challenge
-def h_koth_challenge(u, b):
+def _koth_guarded(u, b):
     k = DB['koth'].get(b.get('game'))
     if k:
         require_seasoned(u, 'challenge a throne')
         block_linked(u, DB['users'].get(k['uid']), 'challenge the throne of')
     return _v5_h_koth_challenge(u, b)
+h_koth_challenge = _king_look(_koth_guarded)
+
+_v5_h_duel_replay = h_duel_replay
+def h_duel_replay(u, q):
+    out = _v5_h_duel_replay(u, q)
+    m = DB['matches'].get((q.get('id') or [''])[0])
+    if m:
+        for side, uid in zip(out['sides'], m['players']):
+            side['look'] = _look(uid)
+            side['me'] = uid == u['uid']
+    return out
 
 _v5_h_t_enter = h_t_enter
 def h_t_enter(u, b):
@@ -4728,6 +4772,7 @@ def h_admin_ac(q):
 GET_PUBLIC.update({'/health': h_health, '/network/stats': h_network, '/economy': h_economy})
 GET_OPTIONAL.update({'/leaderboard': h_leaderboard})
 GET_ADMIN.update({'/admin/anticheat': h_admin_ac})
+GET_AUTH.update({'/duels/replay': h_duel_replay})
 POST_PUBLIC.update({'/auth/register': h_register, '/auth/login': h_login, '/wallet/link/finish': h_wallet_link_finish})
 POST_AUTH.update({'/mine/strike': h_mine_strike, '/fish/cast': h_fish_cast, '/fish/reel': h_fish_reel, '/expedition/start': h_exp_start,
                   '/expedition/strike': h_exp_strike, '/skill/step': h_skill_step, '/practice/submit': h_practice_submit,

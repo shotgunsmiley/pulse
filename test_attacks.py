@@ -300,6 +300,10 @@ def a_human_control():
 def a_node_farm_one_network():
     ip = '172.16.5.5'
     ok_count = 0
+    # start at the top of a node period so the whole farm run lands inside one period
+    e0 = S.epoch_of(S.now())
+    while S.epoch_of(S.now()) == e0:
+        tick(5)
     for i in range(9):
         u = reg(ip='172.16.200.%d' % i)
         for j in range(12):

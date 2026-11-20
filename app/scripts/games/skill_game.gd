@@ -23,6 +23,8 @@ var accept_input := false
 var aborted := false
 var cid := ""          # server challenge id; Rune Sequence asks the server for each new round
 var seq_runes := []    # the runes revealed so far (Rune Sequence)
+var duel_info := {}    # Quickdraw sword duel: {op_name, op_look, op_rts (or []), me_look, me_tier, final}
+const DuelView = preload("res://scripts/duel_view.gd")
 
 
 func run(m, challenge: Dictionary, heading: String) -> void:
@@ -73,7 +75,13 @@ func _wait_frames_until(deadline_ms: int) -> bool:
 
 # ------------------------------------------------------------------ QUICKDRAW
 func _quickdraw() -> void:
-	var pad := UI.add_button(area, "GET READY", "stone", 460, 44)
+	var dv = null
+	var op_rts: Array = duel_info.get("op_rts", [])
+	if not duel_info.is_empty():
+		dv = DuelView.new()
+		area.add_child(dv)
+		dv.setup(M, duel_info.get("me_look", {}), str(duel_info.get("me_tier", "iron")), str(duel_info.get("op_name", "Opponent")), duel_info.get("op_look", {}))
+	var pad := UI.add_button(area, "GET READY", "stone", 220 if dv else 460, 44)
 	pad.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	pad.button_down.connect(func():
 		tap_flag = true
@@ -82,10 +90,13 @@ func _quickdraw() -> void:
 	var rounds := int(ch["rounds"])
 	var delays: Array = ch["delays"]
 	var reactions := []
-	await get_tree().create_timer(1.0).timeout
+	await get_tree().create_timer(1.2 if dv else 1.0).timeout
 	for i in range(rounds):
 		if aborted:
 			return
+		var opr := int(op_rts[i]) if i < op_rts.size() else -1
+		if dv:
+			dv.ready_round(i + 1, rounds)
 		info.text = "Round %d of %d - wait for GREEN" % [i + 1, rounds]
 		UI.style_button(pad, "red")
 		pad.text = "WAIT..."
@@ -99,12 +110,16 @@ func _quickdraw() -> void:
 			pad.text = "TOO EARLY!"
 			M.play("buzz")
 			M.vibrate(40)
-			await get_tree().create_timer(1.0).timeout
+			if dv:
+				dv.early()
+			await get_tree().create_timer(1.9 if dv else 1.0).timeout
 			continue
 		UI.style_button(pad, "green")
 		pad.text = "STRIKE!"
 		M.play("go")
 		var go_t := Time.get_ticks_msec()
+		if dv:
+			dv.go(opr)
 		tap_flag = false
 		var hit: bool = await _wait_frames_until(go_t + 2900)
 		if aborted:
@@ -115,15 +130,25 @@ func _quickdraw() -> void:
 			if rt < 100:
 				reactions.append(-1)
 				pad.text = "TOO EARLY!"
+				if dv:
+					dv.early()
 			else:
 				reactions.append(rt)
 				pad.text = "%d ms" % rt
 				M.play("clink")
+				if dv:
+					dv.player_tap(rt)
 		else:
 			reactions.append(-1)
 			pad.text = "TOO SLOW"
 			M.play("buzz")
-		await get_tree().create_timer(0.9).timeout
+			if dv:
+				dv.too_slow()
+		await get_tree().create_timer(1.9 if dv else 0.9).timeout
+	if dv and not op_rts.is_empty() and not aborted:
+		info.text = "The duel is decided..."
+		await dv.finale(DuelView.tally_winner(reactions, op_rts))
+		await get_tree().create_timer(1.2).timeout
 	_done({"reactions": reactions})
 
 

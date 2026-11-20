@@ -739,9 +739,9 @@ func _hold_rod(on: bool) -> void:
 		m.albedo_color = Color("#6b4a2b")
 		cm.material = m
 		rod.mesh = cm
-		rod.position = Vector3(0, -0.5, -0.6)
+		rod.position = Vector3(0, -0.3, -0.55)
 		rod.rotation.x = -1.2
-		hero.parts["arm_r"].add_child(rod)
+		hero.parts["forearm_r" if hero.parts.has("forearm_r") else "arm_r"].add_child(rod)
 	if rod:
 		rod.visible = on
 

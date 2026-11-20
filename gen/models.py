@@ -64,6 +64,7 @@ PALETTE = [
     ('#9ff3e6', True),   # 54 glow mushroom
     ('#c9b48a', False),  # 55 fish belly
     ('#6a7f8a', False),  # 56 fish back
+    ('#c4ccd6', False),  # 57 polished steel (sword blades)
 ]
 P = {'skin': 0, 'hair': 1, 'shirt': 2, 'pants': 3, 'accent': 4, 'pick': 5, 'wood_d': 6, 'wood': 7, 'wood_l': 8,
      'stone_d': 9, 'stone': 10, 'stone_l': 11, 'boots': 12, 'belt': 13, 'gold': 14, 'iron_d': 15, 'iron': 16,
@@ -72,7 +73,7 @@ P = {'skin': 0, 'hair': 1, 'shirt': 2, 'pants': 3, 'accent': 4, 'pick': 5, 'wood
      'roof_d': 33, 'hall_roof': 34, 'plaster': 35, 'door': 36, 'parch': 37, 'cave_floor': 38, 'cave_wall': 39,
      'banner': 40, 'teal_d': 41, 'leaf': 42, 'leaf_d': 43, 'thatch': 44, 'thatch_d': 45, 'eye': 46,
      'slate': 47, 'slate_d': 48, 'amber': 49, 'garnet': 50, 'sapphire': 51, 'snow': 52, 'water': 53, 'mush': 54,
-     'fish_l': 55, 'fish': 56}
+     'fish_l': 55, 'fish': 56, 'steel': 57}
 
 # Material id per palette index: picks the pixel-texture tile the v5 world shader lays over the colour.
 # 0 plain, 1 cloth, 2 wood, 3 stone, 4 cobble, 5 foliage, 6 dirt, 7 roof, 8 metal, 9 plaster, 10 leather, 11 hair, 12 straw, 13 ore
@@ -81,7 +82,7 @@ MAT_OF = {'skin': 0, 'hair': 11, 'shirt': 1, 'pants': 1, 'accent': 1, 'pick': 8,
           'rust': 13, 'grass': 5, 'grass_d': 5, 'dirt': 6, 'cobble': 4, 'cobble_d': 4, 'pine': 5, 'pine_d': 5, 'roof': 7,
           'roof_d': 7, 'hall_roof': 7, 'plaster': 9, 'door': 2, 'parch': 9, 'cave_floor': 6, 'cave_wall': 3, 'banner': 1,
           'teal_d': 3, 'leaf': 5, 'leaf_d': 5, 'thatch': 12, 'thatch_d': 12, 'eye': 0, 'slate': 7, 'slate_d': 7,
-          'snow': 9, 'water': 0, 'fish_l': 0, 'fish': 0}
+          'snow': 9, 'water': 0, 'fish_l': 0, 'fish': 0, 'steel': 8}
 
 # --------------------------------------------------------------------------- mesh builder
 def shade_noise(p):
@@ -315,7 +316,8 @@ HS = {   # body proportions per style (A: classic chunky, B: same but faceted, C
               leg=0.125, hip=0.8, shoulder=0.34, beard=False),
     'C': dict(smooth=True, sides=8, head=(0.16, 0.18, 0.17), chest=0.31, waist=0.23, depth=0.18, arm=0.105, hand=0.082,
               leg=0.13, hip=0.78, shoulder=0.36, beard=True),
-}[HERO_STYLE]
+}.get(HERO_STYLE, None) or {'smooth': True, 'sides': 8, 'head': (0.155, 0.175, 0.165), 'chest': 0.29, 'waist': 0.21, 'depth': 0.165,
+                             'arm': 0.098, 'hand': 0.078, 'leg': 0.125, 'hip': 0.8, 'shoulder': 0.34, 'beard': False}
 
 def m_hero():
     """2007-era adventurer: big head, broad chest, thick limbs, big hands and boots."""
@@ -445,7 +447,7 @@ HERO_RIG = {   # part -> [model, parent, offset]
     'leg_r': ['hero_leg_r', '', [HS['waist'] * 0.55, HS['hip'], 0]],
     'pickaxe': ['hero_pickaxe', 'arm_r', [0, -0.5, 0]],
 }
-FACES = 6
+FACES = 6 if 'FACES' not in globals() else FACES
 POSES = {   # arm swing angles (degrees, rotation about x) for the strike animation
     'idle': {'arm_r': 8, 'arm_l': 8}, 'raise': {'arm_r': 165, 'arm_l': 150}, 'strike': {'arm_r': 62, 'arm_l': 55},
 }
@@ -719,7 +721,12 @@ def m_mine():
     ex.box(0, 4.6, -0.2, 0.9, 0.06, 0.06, 'parch')
     M['exit_ladder'] = ex
 
-m_hero(); m_town_props(); m_buildings(); m_mine()
+import hero_v6
+if HERO_STYLE in hero_v6.STYLES:
+    HERO_RIG, POSES, FACES = hero_v6.build_hero(Mesh, M, HERO_STYLE)     # v5.1 jointed character
+else:
+    m_hero()
+m_town_props(); m_buildings(); m_mine()
 
 # --------------------------------------------------------------------------- scene layouts
 def ring(r, deg):

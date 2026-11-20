@@ -14,6 +14,9 @@ const ABOUT := {"quickdraw": "Reaction. Tap the moment the pad turns green. 5 ro
 	"sequence": "Memory. Repeat the runes; one more every round.",
 	"sniper": "Precision. Hit the glowing vein before it fades. 12 targets.",
 	"strikeoff": "Mining race. Ten strikes, each faster than the last. Land them in the gold."}
+const DuelView = preload("res://scripts/duel_view.gd")
+# The Training Knight: the sparring partner in practice and cups.
+const KNIGHT_LOOK := {"skin": 0, "hair_style": 0, "hair_color": 4, "shirt": 0, "pants": 3, "accent": 1, "face": 4}
 const EMOTE_TEXT := {"cheer": "Cheer", "wow": "Wow", "laugh": "Ha!", "gg": "GG", "fire": "Fire", "salute": "Salute"}
 
 var M
@@ -310,6 +313,8 @@ func _play(mode: String, game: String, match_id: String) -> void:
 		"ghost": "GHOST RACE"}[mode] + " - " + UI.game_name(game).to_upper()
 	if mode == "ghost" and r.has("ghost"):
 		heading += "  vs %s (%s)" % [str(r["ghost"]["username"]), UI.n(r["ghost"]["score"])]
+	if game == "quickdraw":
+		sg.duel_info = _duel_info(mode, r)
 	sg.run(M, r["challenge"], heading)
 	var result: Dictionary = await sg.finished
 	remove_child(sg)
@@ -362,6 +367,101 @@ func _play(mode: String, game: String, match_id: String) -> void:
 	M.toast(msg, UI.GOLD)
 	M.vibrate(60)
 	M.refresh_profile()
+	if mode == "pvp" and game == "quickdraw":
+		# if the other player already drew, show the whole sword fight now
+		var rep: Dictionary = await M.api.get_json("/duels/replay?id=" + match_id)
+		if rep.get("ok", false) and str(rep.get("state", "active")) != "active":
+			await _sword_fight(rep)
+			return
+		M.toast("Your opponent hasn't drawn yet. Watch the sword fight from DUELS once they do.", UI.TEAL_L)
+	await _refresh()
+
+
+# Who you cross swords with in Quickdraw, and (when known) how fast they are each round.
+func _duel_info(mode: String, r: Dictionary) -> Dictionary:
+	var me_look: Dictionary = M.profile.get("appearance", {})
+	var tier: String = str(M.world.hero.pick_tier) if M.world and M.world.hero else "iron"
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var knight_rts := []
+	for i in range(5):
+		knight_rts.append(rng.randi_range(255, 360))
+	match mode:
+		"ghost":
+			var g: Dictionary = r.get("ghost", {})
+			var res = g.get("result", {})
+			return {"me_look": me_look, "me_tier": tier, "op_name": str(g.get("username", "Ghost")) + "'s ghost", "op_look": g.get("look", KNIGHT_LOOK),
+				"op_rts": res.get("reactions", knight_rts) if typeof(res) == TYPE_DICTIONARY else knight_rts}
+		"pvp":
+			var o: Dictionary = r.get("opponent", {})
+			return {"me_look": me_look, "me_tier": tier, "op_name": str(o.get("username", "Opponent")), "op_look": o.get("look", KNIGHT_LOOK), "op_rts": []}
+		"koth":
+			var t: Dictionary = r.get("throne", {})
+			if t.get("king") == null:
+				return {"me_look": me_look, "me_tier": tier, "op_name": "Empty throne", "op_look": KNIGHT_LOOK, "op_rts": knight_rts}
+			# the throne keeps only the king's total, so the king fights at their average speed
+			var avg := clampi(500 - int(t.get("score", 1000)) / 5, 150, 480)
+			var rts := []
+			for i in range(5):
+				rts.append(clampi(avg + rng.randi_range(-25, 25), 140, 500))
+			return {"me_look": me_look, "me_tier": tier, "op_name": "King " + str(t["king"]), "op_look": t.get("king_look", KNIGHT_LOOK), "op_rts": rts}
+		_:
+			return {"me_look": me_look, "me_tier": tier, "op_name": "Training Knight", "op_look": KNIGHT_LOOK, "op_rts": knight_rts}
+
+
+# Full-screen replay of a finished Quickdraw duel, round by round.
+func _sword_fight(rep: Dictionary) -> void:
+	var sides: Array = rep.get("sides", [])
+	if sides.size() < 2:
+		await _refresh()
+		return
+	var mine: Dictionary = sides[0] if sides[0].get("me", false) else sides[1]
+	var theirs: Dictionary = sides[1] if sides[0].get("me", false) else sides[0]
+	var spectator: bool = not sides[0].get("me", false) and not sides[1].get("me", false)
+	if spectator:
+		mine = sides[0]
+		theirs = sides[1]
+	var a = mine.get("replay")
+	var b = theirs.get("replay")
+	if typeof(a) != TYPE_DICTIONARY or typeof(b) != TYPE_DICTIONARY or not a.has("reactions") or not b.has("reactions"):
+		await _refresh()
+		return
+	playing = true
+	shell.visible = false
+	var box := VBoxContainer.new()
+	box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(box)
+	UI.add_label(box, "QUICKDRAW DUEL - %s PLS" % UI.n(rep.get("stake", 0)), 24, UI.GOLD)
+	var dv = DuelView.new()
+	box.add_child(dv)
+	var mlook: Dictionary = mine.get("look", {})
+	dv.setup(M, mlook, "iron", str(theirs.get("username", "Opponent")), theirs.get("look", KNIGHT_LOOK))
+	dv.custom_minimum_size = Vector2(0, 560)
+	if spectator:
+		dv.me_name = str(mine.get("username", "A"))
+		dv.names.get_child(0).text = dv.me_name
+	var row := UI.add_row(box, 8)
+	var skip := UI.add_button(row, "SKIP", "stone", 54, 20)
+	var fill := Control.new()
+	fill.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	box.add_child(fill)
+	var st := {"done": false}          # lambdas capture locals by value, so share a dictionary
+	skip.pressed.connect(func(): st["done"] = true)
+	var res = rep.get("result")
+	var final_w := ""
+	if res != null and typeof(res) == TYPE_DICTIONARY and res.get("winner") != null:
+		final_w = "me" if str(res["winner"]) == str(mine.get("username", "")) else "op"
+	await get_tree().create_timer(0.8).timeout
+	var fight := func(): await dv.replay(a["reactions"], b["reactions"], final_w)
+	fight.call()
+	while not st["done"] and is_instance_valid(dv):
+		await get_tree().create_timer(0.25).timeout
+		if dv.caption.text.ends_with("WINS THE DUEL!") or dv.caption.text.ends_with("wins the duel.") or dv.caption.text.begins_with("A draw"):
+			skip.text = "CONTINUE"
+	remove_child(box)
+	box.queue_free()
+	shell.visible = true
+	playing = false
 	await _refresh()
 
 
@@ -513,6 +613,9 @@ func _show_replay(mid: String) -> void:
 	var res = r.get("result")
 	if res != null and res.get("winner") != null:
 		UI.add_label(body, "WINNER: %s" % str(res["winner"]), 24, UI.GOLD)
+	if str(r.get("game", "")) == "quickdraw" and str(r.get("state", "")) != "active":
+		var fb := UI.add_button(body, "WATCH THE SWORD FIGHT", "amber", 60, 22)
+		fb.pressed.connect(func(): _sword_fight(r))
 	var er := UI.add_row(body, 6)
 	for e in EMOTE_TEXT.keys():
 		var eb := UI.add_button(er, EMOTE_TEXT[e], "stone", 48, 16)
