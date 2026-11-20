@@ -350,6 +350,16 @@ func _settings() -> void:
 		M.save_settings()
 		_set_tab("settings"))
 	UI.add_label(c, "One-thumb mode puts the STRIKE button at the bottom, nearest your thumb.", 15, UI.MUTED)
+	var levels := [["NORMAL", 1.0], ["BRIGHT", 1.2], ["BRIGHTEST", 1.4]]
+	var bi := clampi(int(M.settings.get("brightness_i", 0)), 0, 2)
+	var br := UI.add_button(c, "BRIGHTNESS: %s" % levels[bi][0], "teal" if bi > 0 else "stone", 60, 22)
+	br.pressed.connect(func():
+		var nb := (bi + 1) % levels.size()
+		M.settings["brightness_i"] = nb
+		M.save_settings()
+		M.world.set_brightness(float(levels[nb][1]))
+		_set_tab("settings"))
+	UI.add_label(c, "Brighter picture for dark screens or night time.", 15, UI.MUTED)
 	var ph := UI.add_button(c, "PHOTO MODE", "amber", 54, 20)
 	ph.pressed.connect(func(): M.photo_mode())
 	var intro := UI.add_button(c, "REPLAY THE INTRO", "stone", 54, 20)
@@ -378,7 +388,7 @@ func _settings() -> void:
 			else:
 				M.error_toast(rr))
 	var c2 := UI.add_card(body, "dark")
-	UI.add_label(c2, "Pulse Network v5.3. PLS is an in-game balance earned by mining and by your phone acting as a node while you mine. It cannot be bought, sold or cashed out.", 16, UI.MUTED)
+	UI.add_label(c2, "Pulse Network v5.5.1. PLS is an in-game balance earned by mining and by your phone acting as a node while you mine. It cannot be bought, sold or cashed out.", 16, UI.MUTED)
 	var tut := UI.add_button(c2, "SHOW THE TUTORIAL AGAIN", "stone", 50, 18)
 	tut.pressed.connect(func():
 		await M.api.post("/me/flags", {"tutorial": false})

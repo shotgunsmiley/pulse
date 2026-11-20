@@ -112,6 +112,7 @@ func _ready() -> void:
 	node.setup(self)
 	add_child(node)
 	world = WorldScript.new()
+	world.brightness = [1.0, 1.2, 1.4][clampi(int(settings.get("brightness_i", 0)), 0, 2)]
 	add_child(world)
 	world.place_tapped.connect(go)
 	world.vein_tapped.connect(_on_vein_tapped)

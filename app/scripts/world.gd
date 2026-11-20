@@ -104,6 +104,7 @@ var pet_t := 0.0
 var weather: CPUParticles3D = null
 var season := ""
 var night := 0.0
+var brightness := 1.0      # player setting (ME > MORE > BRIGHTNESS): 1.0, 1.2 or 1.4
 var sky_timer := 0.0
 var lantern: OmniLight3D = null
 var water: MeshInstance3D = null
@@ -298,7 +299,7 @@ func show_area(area_name: String, opts: Dictionary = {}) -> void:
 			env.fog_depth_end = maxf(14.0, 28.0 - deep * 0.6)
 			env.fog_depth_curve = 1.2
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 1.0 if town else (1.0 if area_name == "cabin" else 1.25)
+	env.tonemap_exposure = (1.0 if town else (1.0 if area_name == "cabin" else 1.25)) * brightness
 	# a warm lamp on the miner's belt so the ground around you is always readable underground
 	if headlamp == null:
 		headlamp = OmniLight3D.new()
@@ -403,22 +404,28 @@ func _update_sky(force: bool = false) -> void:
 	var day := clampf(elev * 2.5 + 0.35, 0.0, 1.0)
 	night = 1.0 - clampf(elev * 4.0 + 0.6, 0.0, 1.0)
 	var dusk := clampf(1.0 - absf(elev) * 4.0, 0.0, 1.0)
-	var zen := Color("#0b1022").lerp(Color("#5b86b8"), day)
-	var hor := Color("#1a2236").lerp(Color("#a9bccb"), day).lerp(Color("#e0956a"), dusk * 0.55)
+	# v5.5.1: a bright moonlit night - still clearly night, but everything stays easy to see on a phone
+	var zen := Color("#22305a").lerp(Color("#5b86b8"), day)
+	var hor := Color("#3d4c72").lerp(Color("#a9bccb"), day).lerp(Color("#e0956a"), dusk * 0.55)
 	sky_mat.set_shader_parameter("zenith", zen)
 	sky_mat.set_shader_parameter("horizon", hor)
 	sky_mat.set_shader_parameter("ground", hor.darkened(0.45))
 	sky_mat.set_shader_parameter("night", night)
-	sky_mat.set_shader_parameter("cloud_col", Color("#3a4258").lerp(Color("#fff8ee"), day).lerp(Color("#f0b090"), dusk * 0.5))
+	sky_mat.set_shader_parameter("cloud_col", Color("#5a6684").lerp(Color("#fff8ee"), day).lerp(Color("#f0b090"), dusk * 0.5))
 	sky_mat.set_shader_parameter("cloud_cover", 0.9 if season == "winter" else 0.72)
 	var az := (h / 24.0) * TAU
 	var sun_dir := Vector3(sin(az) * 0.8, maxf(elev, -0.2), -cos(az) * 0.6).normalized()
 	sky_mat.set_shader_parameter("sun_dir", sun_dir)
-	sun.look_at_from_position(sun_dir * 10.0, Vector3.ZERO, Vector3.UP if absf(sun_dir.y) < 0.95 else Vector3.FORWARD)
-	sun.light_energy = clampf(elev * 2.0 + 0.15, 0.0, 1.3)
-	sun.light_color = Color("#ffb070").lerp(Color("#fff0d6"), clampf(elev * 3.0, 0.0, 1.0))
-	env.ambient_light_color = Color("#5a6a90").lerp(Color("#c4c2b4"), day)
-	env.ambient_light_energy = lerpf(0.45, 0.95, day)
+	# at night the moon takes over: a cool light from high in the sky, so shapes keep their shading
+	var light_dir := sun_dir if elev > -0.05 else Vector3(-0.35, 0.8, 0.45).normalized()
+	sun.look_at_from_position(light_dir * 10.0, Vector3.ZERO, Vector3.UP if absf(light_dir.y) < 0.95 else Vector3.FORWARD)
+	var sun_e := clampf(elev * 2.0 + 0.15, 0.0, 1.3)
+	var moon_e := 0.75 * night
+	sun.light_energy = maxf(sun_e, moon_e)
+	sun.light_color = Color("#ffb070").lerp(Color("#fff0d6"), clampf(elev * 3.0, 0.0, 1.0)) if sun_e >= moon_e else Color("#b8c8f0")
+	env.ambient_light_color = Color("#8a98c4").lerp(Color("#c4c2b4"), day)
+	env.ambient_light_energy = lerpf(1.0, 0.95, day)
+	env.tonemap_exposure = (1.0 + 0.2 * night) * brightness
 	env.fog_light_color = hor
 	for f in flickers:
 		if f["kind"] == "fire":
@@ -1945,3 +1952,13 @@ func _boss_fireworks() -> void:
 			_burst(top, col, 34, 4.5, 0.08, true, 1.3)
 			_burst(top, Color.WHITE, 10, 2.0, 0.05, true, 0.7))
 	shake = maxf(shake, 0.4)
+
+
+
+# ME > MORE > BRIGHTNESS: lifts the whole picture (town, mine, lake, cabin).
+func set_brightness(b: float) -> void:
+	brightness = clampf(b, 0.8, 1.6)
+	if area == "town":
+		_update_sky(true)
+	else:
+		env.tonemap_exposure = (1.0 if area == "cabin" else 1.25) * brightness
