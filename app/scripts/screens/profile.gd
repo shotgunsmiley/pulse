@@ -234,7 +234,7 @@ func _stats() -> void:
 	var ranks: Dictionary = p.get("ranks", {})
 	var elo: Dictionary = p.get("elo", {})
 	var best: Dictionary = p.get("best", {})
-	for g in ["quickdraw", "sequence", "sniper"]:
+	for g in ["quickdraw", "sequence", "sniper", "strikeoff", "tempo", "cartrun", "oresort", "stack"]:
 		UI.add_label(c, "%s: %s (%s), best %s" % [UI.game_name(g), str(ranks.get(g, "Bronze")), UI.n(elo.get(g, 1200)), UI.n(best.get(g))], 18, UI.MUTED)
 	var luck: Dictionary = p.get("luck", {})
 	UI.add_label(c, "Gambit Hall: %s bets, %s PLS wagered, %s paid out" % [UI.n(luck.get("bets", 0)), UI.n(luck.get("wagered", 0)), UI.n(luck.get("paid", 0))], 18, UI.MUTED)

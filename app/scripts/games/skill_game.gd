@@ -25,6 +25,7 @@ var cid := ""          # server challenge id; Rune Sequence asks the server for 
 var seq_runes := []    # the runes revealed so far (Rune Sequence)
 var duel_info := {}    # Quickdraw sword duel: {op_name, op_look, op_rts (or []), me_look, me_tier, final}
 const DuelView = preload("res://scripts/duel_view.gd")
+const SG2 = preload("res://scripts/games/skill_games2.gd")
 
 
 func run(m, challenge: Dictionary, heading: String) -> void:
@@ -50,6 +51,19 @@ func run(m, challenge: Dictionary, heading: String) -> void:
 			await _sniper()
 		"strikeoff":
 			await _strikeoff()
+		"tempo", "cartrun", "oresort", "stack":
+			var res: Dictionary = {}
+			match str(ch["game"]):
+				"tempo":
+					res = await SG2.play_tempo(self)
+				"cartrun":
+					res = await SG2.play_cartrun(self)
+				"oresort":
+					res = await SG2.play_oresort(self)
+				_:
+					res = await SG2.play_stack(self)
+			if not aborted:
+				_done(res)
 
 
 func _quit() -> void:
@@ -364,6 +378,8 @@ static func quality_of(s: Dictionary, tap: int) -> String:
 
 # Offline practice: build a challenge on the phone (same shapes as the server's).
 static func local_challenge(game: String) -> Dictionary:
+	if game in ["tempo", "cartrun", "oresort", "stack"]:
+		return SG2.local_challenge(game)
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	match game:
@@ -392,6 +408,20 @@ static func local_challenge(game: String) -> Dictionary:
 
 static func local_score(c: Dictionary, result: Dictionary) -> int:
 	match str(c.get("game", "")):
+		"tempo":
+			return result.get("taps", []).size() * 60
+		"cartrun":
+			return result.get("moves", []).size() * 15
+		"oresort":
+			var right := 0
+			var items: Array = c.get("items", [])
+			var ans: Array = result.get("answers", [])
+			for i in range(mini(items.size(), ans.size())):
+				if int(ans[i][0]) == int(items[i]["ore"]):
+					right += 1
+			return right * 80
+		"stack":
+			return result.get("taps", []).size() * 100
 		"quickdraw":
 			var total := 0
 			for rt in result.get("reactions", []):

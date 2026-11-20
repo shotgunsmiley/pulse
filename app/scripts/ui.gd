@@ -33,7 +33,9 @@ const BTN := {
 
 const ORE_NAMES := {"coal": "Coal", "iron": "Iron Ore", "crystal": "Pulse Crystal", "void": "Void Shard"}
 const ORE_ICONS := {"coal": "coal", "iron": "iron", "crystal": "pulse_crystal", "void": "void_shard"}
-const GAME_NAMES := {"quickdraw": "Quickdraw", "sequence": "Rune Sequence", "sniper": "Vein Sniper", "strikeoff": "Strike-Off"}
+const GAME_NAMES := {"quickdraw": "Quickdraw", "sequence": "Rune Sequence", "sniper": "Vein Sniper", "strikeoff": "Strike-Off",
+	"tempo": "Forge Tempo", "cartrun": "Cart Run", "oresort": "Ore Sort", "stack": "Crate Stack",
+	"flip": "Crystal Flip", "dice": "Ore Dice", "cavein": "Cave-In", "highlow": "High-Low Ore", "cartdrop": "Cart Drop", "chests": "Three Chests", "wheel": "Lucky Wheel"}
 const FRAME = preload("res://textures/ui_frame.png")
 const FRAME_GOLD = preload("res://textures/ui_frame_gold.png")
 

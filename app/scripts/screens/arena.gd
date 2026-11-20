@@ -9,11 +9,17 @@ extends VBoxContainer
 
 const UI = preload("res://scripts/ui.gd")
 const SkillGame = preload("res://scripts/games/skill_game.gd")
-const GAMES := ["quickdraw", "sequence", "sniper", "strikeoff"]
+const GAMES := ["quickdraw", "sequence", "sniper", "strikeoff", "tempo", "cartrun", "oresort", "stack"]
 const ABOUT := {"quickdraw": "Reaction. Tap the moment the pad turns green. 5 rounds.",
 	"sequence": "Memory. Repeat the runes; one more every round.",
 	"sniper": "Precision. Hit the glowing vein before it fades. 12 targets.",
-	"strikeoff": "Mining race. Ten strikes, each faster than the last. Land them in the gold."}
+	"strikeoff": "Mining race. Ten strikes, each faster than the last. Land them in the gold.",
+	"tempo": "Rhythm. Hammer the glowing ingots on the beat. The forge speeds up.",
+	"cartrun": "Reflexes. Switch rails to dodge falling rocks; grab gems on the way.",
+	"oresort": "Speed. Sort each ore into the right bin before time runs out. 3 lives.",
+	"stack": "Precision. Drop swinging crates; only the overlap stays. Build high."}
+const SHORT := {"quickdraw": "QUICK", "sequence": "RUNES", "sniper": "SNIPER", "strikeoff": "STRIKE", "tempo": "TEMPO",
+	"cartrun": "CART", "oresort": "SORT", "stack": "STACK"}
 const DuelView = preload("res://scripts/duel_view.gd")
 # The Training Knight: the sparring partner in practice and cups.
 const KNIGHT_LOOK := {"skin": 0, "hair_style": 0, "hair_color": 4, "shirt": 0, "pants": 3, "accent": 1, "face": 4}
@@ -100,14 +106,65 @@ func _refresh() -> void:
 
 
 # ------------------------------------------------------------------ practice
+# A 4-wide grid of game buttons (8 games no longer fit on one row).
+func _game_grid(parent: Node, selected: String, on_pick: Callable) -> void:
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 6)
+	grid.add_theme_constant_override("v_separation", 6)
+	parent.add_child(grid)
+	for g in GAMES:
+		var gb := UI.add_button(grid, SHORT[g], "amber" if g == selected else "stone", 46, 16)
+		gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var gg: String = g
+		gb.pressed.connect(func(): on_pick.call(gg))
+
+
 func _render_practice() -> void:
 	UI.clear(body)
 	var best: Dictionary = M.profile.get("best", {})
+	var gs: Dictionary = await M.api.get_json("/games")
+	if tab != "practice":
+		return
+	UI.clear(body)
+	var stats := {}
+	if gs.get("ok", false):
+		for row in gs["skill"]:
+			stats[row["game"]] = row
+		var gd: Dictionary = gs["gotd"]
+		var gc := UI.add_card(body, "gold")
+		UI.add_label(gc, "GAME OF THE DAY: %s" % str(gd["skill_name"]).to_upper(), 24, UI.GOLD)
+		UI.add_label(gc, "+20 xp a run (%d left today). Today's top 3 win a gem tomorrow.  Luck game of the day: %s." % [int(gd["xp_left"]), str(gd["luck_name"])], 17, UI.WHITE)
+		var board: Array = gd.get("board", [])
+		if not board.is_empty():
+			var parts := []
+			for i in range(mini(3, board.size())):
+				parts.append("%d. %s %s" % [i + 1, str(board[i]["username"]), UI.n(board[i]["score"])])
+			UI.add_label(gc, "  ".join(PackedStringArray(parts)), 17, UI.TEAL_L)
+		var pb := UI.add_button(gc, "PLAY %s" % str(gd["skill_name"]).to_upper(), "amber", 52, 20)
+		var gsk: String = gd["skill"]
+		pb.pressed.connect(func(): _play("practice", gsk, ""))
 	for g in GAMES:
-		var card := UI.add_card(body, "dark")
-		UI.add_label(card, UI.game_name(g).to_upper(), 26, UI.TEAL_L)
+		var st: Dictionary = stats.get(g, {})
+		var card := UI.add_card(body, "gold" if st.get("gotd", false) else "dark")
+		var head := UI.add_row(card, 6)
+		UI.add_label(head, UI.game_name(g).to_upper() + ("   NEW" if g in ["tempo", "cartrun", "oresort", "stack"] else ""), 26, UI.TEAL_L)
+		var rk := UI.add_label(head, str(st.get("rank", "")), 18, UI.AMBER)
+		rk.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		rk.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		UI.add_label(card, ABOUT[g], 18, UI.MUTED)
 		UI.add_label(card, "Personal best: %s" % UI.n(best.get(g)), 20, UI.GOLD)
+		if not st.is_empty() and int(st.get("played", 0)) > 0:
+			var line := "Played %s" % UI.n(st["played"])
+			if st.get("win_rate") != null:
+				line += "  -  duels %d-%d (%d%%)" % [int(st["wins"]), int(st["losses"]), int(round(float(st["win_rate"]) * 100))]
+			var rec: Array = st.get("recent", [])
+			if not rec.is_empty():
+				var rs := []
+				for x in rec.slice(-5):
+					rs.append(UI.n(x))
+				line += "  -  recent: " + ", ".join(PackedStringArray(rs))
+			UI.add_label(card, line, 16, UI.MUTED)
 		if g == "quickdraw" and M.daily.has("knight_ms"):
 			var done: bool = M.daily.get("knight_done", false)
 			UI.add_label(card, ("Today's Training Knight: %d ms average - " % int(M.daily["knight_ms"])) + ("beaten today!" if done else "beat it for an ore purse"), 18, UI.TEAL_L if done else UI.AMBER)
@@ -143,13 +200,9 @@ func _render_duels() -> void:
 		cancel.pressed.connect(func(): _post("/pvp/cancel", {}, "Search cancelled. Stake returned."))
 	else:
 		UI.add_label(card, "FIND A DUEL", 22, UI.AMBER)
-		var gr := UI.add_row(card, 6)
-		for g in GAMES:
-			var gb := UI.add_button(gr, UI.game_name(g).split(" ")[0].to_upper(), "amber" if g == duel_game else "stone", 52, 18)
-			gb.pressed.connect(func():
-				duel_game = g
-				_render_duels()
-			)
+		_game_grid(card, duel_game, func(g: String):
+			duel_game = g
+			_render_duels())
 		UI.add_label(card, "Stake (PLS):", 18, UI.MUTED)
 		var sr := UI.add_row(card, 4)
 		for s in status.get("stakes", [0, 10, 25, 50, 100, 250]):
@@ -516,12 +569,9 @@ func _render_more() -> void:
 				else:
 					UI.add_label(c, "You hold this throne. Every failed challenge grows your pot.", 17, UI.GREEN)
 		"ghosts":
-			var gr := UI.add_row(body, 6)
-			for g in GAMES:
-				var gb := UI.add_button(gr, UI.game_name(g).split(" ")[0].to_upper(), "amber" if g == ghost_game else "stone", 48, 16)
-				gb.pressed.connect(func():
-					ghost_game = g
-					_refresh())
+			_game_grid(body, ghost_game, func(g: String):
+				ghost_game = g
+				_refresh())
 			var r2: Dictionary = await M.api.get_json("/ghosts?game=" + ghost_game)
 			if not r2.get("ok", false) or tab != "more":
 				return
@@ -540,12 +590,9 @@ func _render_more() -> void:
 				return
 			UI.add_label(body, "Put PLS on your best practice score. Anyone who beats it in practice takes the bounty (5% is burned). Unclaimed bounties come back after 7 days.", 17, UI.MUTED)
 			var pc := UI.add_card(body, "stone")
-			var gr2 := UI.add_row(pc, 6)
-			for g in GAMES:
-				var gb2 := UI.add_button(gr2, UI.game_name(g).split(" ")[0].to_upper(), "amber" if g == bounty_game else "stone", 46, 16)
-				gb2.pressed.connect(func():
-					bounty_game = g
-					_refresh())
+			_game_grid(pc, bounty_game, func(g: String):
+				bounty_game = g
+				_refresh())
 			var amt := UI.add_input(pc, "Bounty in PLS (10 - 1000)")
 			var post := UI.add_button(pc, "POST BOUNTY ON MY %s SCORE" % UI.game_name(bounty_game).to_upper(), "amber", 54, 18)
 			post.pressed.connect(func(): _post("/bounty/post", {"game": bounty_game, "amount": int(amt.text)}, "Bounty posted!"))

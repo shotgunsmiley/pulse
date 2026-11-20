@@ -5582,6 +5582,772 @@ POST_AUTH.update({'/mine/strike': h_mine_strike, '/cart/claim': h_cart_claim, '/
 GET_AUTH.update({'/me': h_me, '/mine/veins': h_veins, '/merchant': h_merchant, '/duels/replay': h_duel_replay_x,
                  '/duels/live': h_duels_live_x, '/cabin': h_cabin_x, '/badges': h_badges_x})
 
+# ===========================================================================
+# v5.4 GAMES - four new skill games, four new luck games, ore-only luck play,
+# Game of the Day, and per-game ranks and stats.
+# ===========================================================================
+# Skill games are seeded challenges like the old ones: every player in a duel or
+# cup gets the same challenge, the phone sends what the player did, and the server
+# replays it to work out the score. Impossible or machine-perfect play is refused.
+# Luck games use the same provably fair rolls (HMAC of server seed + client seed +
+# nonce) and the same 3% house edge. Every luck game can also be played for ore.
+VERSION = 5.4
+
+NEW_SKILL = ['tempo', 'cartrun', 'oresort', 'stack']
+for _g in NEW_SKILL:
+    if _g not in GAMES:
+        GAMES.append(_g)
+for _u in DB['users'].values():
+    for _g in GAMES:
+        _u['elo'].setdefault(_g, 1200)
+
+GAME_NAMES = {'quickdraw': 'Quickdraw', 'sequence': 'Rune Sequence', 'sniper': 'Vein Sniper', 'strikeoff': 'Strike-Off',
+              'tempo': 'Forge Tempo', 'cartrun': 'Cart Run', 'oresort': 'Ore Sort', 'stack': 'Crate Stack',
+              'flip': 'Crystal Flip', 'dice': 'Ore Dice', 'cavein': 'Cave-In', 'highlow': 'High-Low Ore',
+              'cartdrop': 'Cart Drop', 'chests': 'Three Chests', 'wheel': 'Lucky Wheel'}
+LUCK_GAMES = ['flip', 'dice', 'cavein', 'highlow', 'cartdrop', 'chests', 'wheel']
+
+# ---------------------------------------------------------------- skill: challenges
+TEMPO_BEATS = 28
+CART_OBSTACLES = 60
+SORT_ITEMS = 32
+STACK_LEVELS = 40
+
+
+def _new_make_challenge(game, seed):
+    rng = random.Random(seed)
+    if game == 'tempo':
+        # Forge Tempo: hammer on the beat. The tempo climbs from 84 to 150 bpm, with a few rests.
+        t, beats = 1600, []
+        for i in range(TEMPO_BEATS):
+            bpm = 84 + (150 - 84) * i / (TEMPO_BEATS - 1)
+            step = 60000.0 / bpm
+            if i > 6 and rng.random() < 0.15:
+                step *= 2                        # a rest: one beat skipped
+            t += step
+            beats.append(int(t))
+        return {'game': game, 'beats': beats, 'windows': [45, 90, 150]}
+    if game == 'cartrun':
+        # Cart Run: three rails, rocks come down them; tap left/right to switch rails.
+        t, obs, gems = 1800, [], []
+        for i in range(CART_OBSTACLES):
+            gap = max(520, 1300 - i * 14)
+            t += gap
+            lanes = [rng.randint(0, 2)]
+            if i >= 15 and rng.random() < 0.25:
+                lanes.append((lanes[0] + rng.randint(1, 2)) % 3)
+            obs.append({'t': int(t), 'lanes': sorted(lanes)})
+            if rng.random() < 0.4:
+                gems.append({'t': int(t + gap / 2), 'lane': rng.randint(0, 2)})
+        return {'game': game, 'lanes': 3, 'start_lane': 1, 'obstacles': obs, 'gems': gems,
+                'visible_ms': 1400, 'min_visible_ms': 700, 'vis_step': 12}
+    if game == 'oresort':
+        # Ore Sort: each ore must be swiped to its bin before time runs out. More kinds as you go.
+        items = []
+        for i in range(SORT_ITEMS):
+            kinds = 2 if i < 10 else (3 if i < 20 else 4)
+            items.append({'ore': rng.randint(0, kinds - 1), 'limit': int(max(900, 2600 - i * 55))})
+        return {'game': game, 'items': items, 'bins': ['coal', 'iron', 'crystal', 'void'], 'lives': 3}
+    if game == 'stack':
+        # Crate Stack: a crate swings over the tower; tap to drop it. Only the overlap stays.
+        levels = [{'speed': round(0.45 + i * 0.03, 4), 'offset': round(rng.random() * 2, 4)} for i in range(STACK_LEVELS)]
+        return {'game': game, 'levels': levels, 'width': 0.5, 'perfect': 0.012}
+    return _v53_make_challenge(game, seed)
+
+
+_v53_make_challenge = make_challenge
+make_challenge = _new_make_challenge
+
+
+def tri(phase):
+    phase = phase % 2.0
+    return phase if phase <= 1.0 else 2.0 - phase
+
+
+def stack_sim(ch, taps):
+    """Replays Crate Stack. Returns (height, perfects, widths)."""
+    prev_x, prev_w = (1.0 - ch['width']) / 2, ch['width']
+    height = perfects = 0
+    w = ch['width']
+    for lv, tap in zip(ch['levels'], taps):
+        x = tri(tap / 1000.0 * lv['speed'] + lv['offset']) * (1.0 - w)
+        if abs(x - prev_x) <= ch['perfect']:
+            x = prev_x
+            perfects += 1
+            new_w = w
+        else:
+            left, right = max(x, prev_x), min(x + w, prev_x + prev_w)
+            new_w = right - left
+            if new_w <= 0.004:
+                break
+            x = left
+        height += 1
+        prev_x, prev_w, w = x, new_w, new_w
+    return height, perfects
+
+
+def cart_visible(ch, i):
+    return max(ch['min_visible_ms'], ch['visible_ms'] - i * ch.get('vis_step', 8))
+
+
+def cart_sim(ch, moves):
+    """Replays Cart Run. moves = [[t_ms, lane], ...]. Returns (passed, gems, end_ms, dodge_reactions)."""
+    lane_at = []
+    lane = ch['start_lane']
+    for t, l in moves:
+        lane_at.append((t, l))
+    def lane_when(t):
+        cur = ch['start_lane']
+        for mt, ml in lane_at:
+            if mt <= t:
+                cur = ml
+            else:
+                break
+        return cur
+    passed, end, prev_t = 0, 0, 0
+    reactions = []
+    for i, o in enumerate(ch['obstacles']):
+        appear = o['t'] - cart_visible(ch, i)
+        at = lane_when(o['t'])
+        if at in o['lanes']:
+            end = o['t']
+            break
+        # how long after the move became possible (rock in sight AND the last rock passed) did the player move?
+        start = max(appear, prev_t)
+        if lane_when(start) in o['lanes']:
+            mv = next((mt for mt, ml in lane_at if start <= mt <= o['t'] and ml not in o['lanes']), None)
+            if mv is not None:
+                reactions.append(mv - start)
+        passed += 1
+        end = prev_t = o['t']
+    gems = 0
+    for g in ch['gems']:
+        if g['t'] <= end and lane_when(g['t']) == g['lane']:
+            gems += 1
+    return passed, gems, end, reactions
+
+
+def _sanitize_new(game, r):
+    if not isinstance(r, dict):
+        return {}
+    if game == 'tempo':
+        return {'taps': [to_int(x, -1) for x in (r.get('taps') or [])[:TEMPO_BEATS * 3]]}
+    if game == 'cartrun':
+        out = []
+        for m in (r.get('moves') or [])[:400]:
+            if isinstance(m, (list, tuple)) and len(m) == 2:
+                out.append([to_int(m[0], -1), to_int(m[1], -1)])
+        return {'moves': out}
+    if game == 'oresort':
+        out = []
+        for a in (r.get('answers') or [])[:SORT_ITEMS]:
+            if isinstance(a, (list, tuple)) and len(a) == 2:
+                out.append([to_int(a[0], -2), to_int(a[1], -1)])
+        return {'answers': out}
+    if game == 'stack':
+        return {'taps': [to_int(x, -1) for x in (r.get('taps') or [])[:STACK_LEVELS]]}
+    return None
+
+
+_v53_sanitize_result = sanitize_result
+def sanitize_result(game, r):
+    out = _sanitize_new(game, r)
+    return out if out is not None else _v53_sanitize_result(game, r)
+
+
+def _sd(xs):
+    if not xs:
+        return 0.0
+    m = sum(xs) / float(len(xs))
+    return (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5
+
+
+def _score_new(ch, result, elapsed_ms):
+    game = ch['game']
+    r = _sanitize_new(game, result)
+    slack = 900
+    if game == 'tempo':
+        taps = sorted(t for t in r['taps'] if t >= 0)
+        if any(t > ch['beats'][-1] + 2000 for t in taps):
+            raise ApiError('bad_result')
+        used = set()
+        pts, combo, errs, counts = 0, 0, [], {'perfect': 0, 'great': 0, 'good': 0, 'miss': 0}
+        for b in ch['beats']:
+            best, bi = None, -1
+            for i, t in enumerate(taps):
+                if i in used:
+                    continue
+                d = abs(t - b)
+                if d <= ch['windows'][2] and (best is None or d < best):
+                    best, bi = d, i
+            if bi < 0:
+                counts['miss'] += 1
+                combo = 0
+                continue
+            used.add(bi)
+            errs.append(taps[bi] - b)
+            q = 'perfect' if best <= ch['windows'][0] else ('great' if best <= ch['windows'][1] else 'good')
+            counts[q] += 1
+            combo += 1
+            pts += {'perfect': 100, 'great': 60, 'good': 30}[q] + min(50, combo * 2)
+        extra = len(taps) - len(used)
+        pts = max(0, pts - extra * 15)
+        if len(errs) >= 20 and _sd(errs) < 4.0 and abs(sum(errs) / len(errs)) < 6:
+            raise ApiError('impossible_reaction', 'Every hammer blow landed on the exact millisecond. That is not a human hand.')
+        if taps and elapsed_ms + slack < max(taps):
+            raise ApiError('too_fast', 'Result arrived faster than the song can be played.')
+        return pts, '%d perfect, %d great, %d good, %d missed%s' % (counts['perfect'], counts['great'], counts['good'], counts['miss'],
+                                                                   (', %d stray taps' % extra) if extra else '')
+    if game == 'cartrun':
+        moves = r['moves']
+        last_t = -1000
+        for t, l in moves:
+            if t < 0 or l < 0 or l > 2 or t - last_t < 90:
+                raise ApiError('bad_result')
+            last_t = t
+        passed, gems, end, reactions = cart_sim(ch, moves)
+        if len(reactions) >= 15 and (max(reactions) < 140 or _sd(reactions) < 10):
+            raise ApiError('impossible_reaction', 'Every rock was dodged with machine timing. That is not a human hand.')
+        if elapsed_ms + slack < end:
+            raise ApiError('too_fast', 'Result arrived faster than the run can be played.')
+        score = passed * 10 + gems * 25 + (100 if passed == len(ch['obstacles']) else 0)
+        return score, '%d rocks dodged, %d gems%s' % (passed, gems, ' - the whole track!' if passed == len(ch['obstacles']) else '')
+    if game == 'oresort':
+        ans = r['answers']
+        if len(ans) > len(ch['items']):
+            raise ApiError('bad_result')
+        pts, streak, lives, right, used, rts = 0, 0, ch['lives'], 0, 0, []
+        for item, (choice, rt) in zip(ch['items'], ans):
+            if lives <= 0:
+                raise ApiError('bad_result')
+            if choice == -1:
+                rt = item['limit']
+            elif rt < 200 or rt > item['limit']:
+                raise ApiError('impossible_reaction', 'That sort was faster than a human can see the ore.')
+            used += rt + 250
+            if choice == item['ore']:
+                right += 1
+                streak += 1
+                rts.append(rt)
+                pts += 50 + int(50 * (item['limit'] - rt) / float(item['limit'])) + min(50, streak * 5)
+            else:
+                streak = 0
+                lives -= 1
+        if len(rts) >= 20 and _sd(rts) < 15:
+            raise ApiError('impossible_reaction', 'Every sort took exactly the same time. That is not a human hand.')
+        if elapsed_ms + slack < used * 0.85:
+            raise ApiError('too_fast', 'Result arrived faster than the ores can be sorted.')
+        return pts, '%d sorted right, %d mistakes' % (right, ch['lives'] - lives)
+    if game == 'stack':
+        taps = r['taps']
+        for t in taps:
+            if t < 150 or t > 9000:
+                raise ApiError('impossible_reaction', 'That drop timing is not possible.')
+        height, perfects = stack_sim(ch, taps)
+        if height >= 15 and perfects == height:
+            raise ApiError('impossible_reaction', 'Every crate landed dead centre. That is not a human hand.')
+        if elapsed_ms + slack < sum(taps[:height + 1]) * 0.9:
+            raise ApiError('too_fast', 'Result arrived faster than the crates can fall.')
+        return height * 100 + perfects * 50, '%d crates high, %d perfect drops' % (height, perfects)
+    return None
+
+
+_v53_score_result = score_result
+def score_result(ch, result, elapsed_ms):
+    if ch.get('game') in NEW_SKILL:
+        return _score_new(ch, result, elapsed_ms)
+    return _v53_score_result(ch, result, elapsed_ms)
+
+
+# ---------------------------------------------------------------- Game of the Day + per-game stats
+def game_of_the_day(d=None):
+    d = d or day_key()
+    r = random.Random(_seed('gotd', d))
+    return {'skill': r.choice(GAMES), 'luck': r.choice(LUCK_GAMES)}
+
+
+def _gstats(u, g):
+    s = u.setdefault('gstats', {})
+    return s.setdefault(g, {'played': 0, 'wins': 0, 'losses': 0, 'recent': []})
+
+
+def _settle_gotd():
+    """Yesterday's Game of the Day board pays its top 3 in gems (lazily, on the first request of a new day)."""
+    today = day_key()
+    for d in [k for k in DB.setdefault('gotd', {}) if k != today]:
+        b = DB['gotd'].pop(d)
+        rows = sorted(b['scores'].items(), key=lambda kv: -kv[1])[:3]
+        for place, (uid, score) in enumerate(rows):
+            w = DB['users'].get(uid)
+            if w:
+                gem = ['sapphire', 'garnet', 'amber'][place]
+                w['gems'][gem] += 1
+                push_inbox(w, {'kind': 'news', 'text': 'You placed #%d on the %s Game of the Day board: +1 %s!' % (place + 1, GAME_NAMES.get(b['game'], b['game']), gem)})
+
+
+_v53_record_best = record_best
+def record_best(u, game, score):
+    new = _v53_record_best(u, game, score)
+    s = _gstats(u, game)
+    s['played'] += 1
+    s['recent'] = (s['recent'] + [score])[-10:]
+    gd = game_of_the_day()
+    if game == gd['skill']:
+        _settle_gotd()
+        b = DB['gotd'].setdefault(day_key(), {'game': game, 'scores': {}})
+        if score > b['scores'].get(u['uid'], -1):
+            b['scores'][u['uid']] = score
+        if day_count(u, 'gotd_xp') < 5:
+            day_add(u, 'gotd_xp')
+            u['xp'] += 20
+    return new
+
+
+_v54_settle = settle_match
+def settle_match(m):
+    was = m['state']
+    _v54_settle(m)
+    if was == 'active' and m['state'] == 'settled':
+        w = (m.get('result') or {}).get('winner')
+        for uid in m['players']:
+            p = DB['users'].get(uid)
+            if p and w:
+                s = _gstats(p, m['game'])
+                if p['username'] == w:
+                    s['wins'] += 1
+                else:
+                    s['losses'] += 1
+
+
+def h_games(u, q):
+    _settle_gotd()
+    gd = game_of_the_day()
+    board = DB['gotd'].get(day_key(), {'scores': {}})
+    rows = sorted(board['scores'].items(), key=lambda kv: -kv[1])[:10]
+    out = []
+    for g in GAMES:
+        s = _gstats(u, g)
+        n = s['wins'] + s['losses']
+        out.append({'game': g, 'name': GAME_NAMES.get(g, g), 'best': u['best'].get(g), 'played': s['played'], 'wins': s['wins'],
+                    'losses': s['losses'], 'win_rate': round(s['wins'] / float(n), 3) if n else None, 'recent': s['recent'],
+                    'elo': u['elo'].get(g, 1200), 'rank': rank_for(u['elo'].get(g, 1200)), 'gotd': g == gd['skill']})
+    luck = []
+    lg = u.get('luck_g', {})
+    for g in LUCK_GAMES:
+        s = lg.get(g, {})
+        luck.append({'game': g, 'name': GAME_NAMES[g], 'bets': s.get('bets', 0), 'wagered': s.get('wagered', 0), 'paid': s.get('paid', 0),
+                     'ore_bets': s.get('ore_bets', 0), 'biggest': s.get('biggest', 0), 'gotd': g == gd['luck']})
+    return {'ok': True, 'gotd': {'skill': gd['skill'], 'luck': gd['luck'], 'skill_name': GAME_NAMES.get(gd['skill']),
+                                 'luck_name': GAME_NAMES.get(gd['luck']), 'xp_left': max(0, 5 - day_count(u, 'gotd_xp')),
+                                 'board': [{'username': DB['users'][k]['username'], 'score': v} for k, v in rows if k in DB['users']]},
+            'skill': out, 'luck': luck}
+
+
+# ---------------------------------------------------------------- luck: PLS or ore
+LUCK_ORE_MAX = 500
+
+
+def stake_of(u, b):
+    """What the player is betting: PLS (default) or ore. Checks limits and balance."""
+    if str(b.get('currency', 'pls')) == 'ore':
+        kind = str(b.get('ore', 'coal'))
+        if kind not in ORES:
+            raise ApiError('bad_ore')
+        bet = to_int(b.get('bet'), 0)
+        if bet < 1 or bet > LUCK_ORE_MAX:
+            raise ApiError('bad_bet', 'Ore bets are 1 to %d.' % LUCK_ORE_MAX)
+        if u['ore'][kind] < bet:
+            raise ApiError('not_enough', 'You do not have that much %s.' % kind)
+        return {'cur': 'ore', 'kind': kind, 'bet': bet}
+    return {'cur': 'pls', 'bet': check_bet(u, b.get('bet'))}
+
+
+def stake_take(u, s, tag):
+    if s['cur'] == 'ore':
+        u['ore'][s['kind']] -= s['bet']
+    else:
+        move(U(u['uid']), 'house', s['bet'], tag + '_bet')
+
+
+def stake_pay(u, s, exact, tag, game):
+    """Pays a win (exact may be fractional; leftover fractions carry, so rounding never adds edge)."""
+    lg = u.setdefault('luck_g', {}).setdefault(game, {})
+    if s['cur'] == 'ore':
+        dust = u['luck'].setdefault('ore_dust', {})
+        total = max(0.0, exact) + dust.get(s['kind'], 0.0)
+        whole = int(total)
+        dust[s['kind']] = round(total - whole, 6)
+        u['ore'][s['kind']] += whole
+        lg['ore_bets'] = lg.get('ore_bets', 0) + 1
+        return whole
+    payout = payout_of(u, exact)
+    if payout:
+        move('house', U(u['uid']), payout, tag + '_win')
+    luck_done(u, s['bet'], payout)
+    lg['bets'] = lg.get('bets', 0) + 1
+    lg['wagered'] = lg.get('wagered', 0) + s['bet']
+    lg['paid'] = lg.get('paid', 0) + payout
+    lg['biggest'] = max(lg.get('biggest', 0), payout)
+    return payout
+
+
+def _bal(u, s):
+    return u['ore'][s['kind']] if s['cur'] == 'ore' else u['balance']
+
+
+def _luck_out(u, s, out):
+    out.update({'currency': s['cur'], 'ore': s.get('kind'), 'balance': u['balance'], 'ore_inv': u['ore'],
+                'server_hash': u['fair']['server_hash']})
+    return out
+
+
+# Old luck games, now with ore play too (same maths as before).
+def h_flip2(u, b):
+    s = stake_of(u, b)
+    pick = b.get('pick')
+    if pick not in ('teal', 'amber'):
+        raise ApiError('bad_pick')
+    (r,), nonce = fair_floats(u, 1)
+    side = 'teal' if r < 0.5 else 'amber'
+    stake_take(u, s, 'flip')
+    payout = stake_pay(u, s, s['bet'] * 2 * (1 - HOUSE_EDGE) if side == pick else 0, 'flip', 'flip')
+    save()
+    return _luck_out(u, s, {'ok': True, 'result': side, 'win': payout > 0, 'payout': payout, 'roll': round(r, 6), 'nonce': nonce})
+
+
+def h_dice2(u, b):
+    s = stake_of(u, b)
+    target = to_int(b.get('target'), 0)
+    if target < 2 or target > 95:
+        raise ApiError('bad_target', 'Pick a target from 2 to 95.')
+    (r,), nonce = fair_floats(u, 1)
+    roll = int(r * 10000) / 100.0
+    stake_take(u, s, 'dice')
+    payout = stake_pay(u, s, s['bet'] * 100 * (1 - HOUSE_EDGE) / target if roll < target else 0, 'dice', 'dice')
+    save()
+    return _luck_out(u, s, {'ok': True, 'roll': roll, 'target': target, 'win': payout > 0, 'payout': payout,
+                            'multiplier': round(100 * (1 - HOUSE_EDGE) / target, 4), 'nonce': nonce})
+
+
+def h_cave_start2(u, b):
+    if u.get('cavein'):
+        raise ApiError('finish_cavein', 'Finish your current Cave-In run first.')
+    s = stake_of(u, b)
+    caves = to_int(b.get('caves'), 0)
+    if caves < 1 or caves > 10:
+        raise ApiError('bad_caves', 'Pick 1 to 10 cave-ins.')
+    vals, nonce = fair_floats(u, 24)
+    cells = list(range(25))
+    for i in range(24, 0, -1):
+        j = int(vals[24 - i] * (i + 1))
+        cells[i], cells[j] = cells[j], cells[i]
+    stake_take(u, s, 'cavein')
+    u['cavein'] = {'bet': s['bet'], 'caves': caves, 'cells': sorted(cells[:caves]), 'opened': [], 'nonce': nonce, 'stake': s}
+    save()
+    return _luck_out(u, s, {'ok': True, 'game': cavein_view(u['cavein'])})
+
+
+def cave_cashout(u):
+    g = u['cavein']
+    s = g.get('stake') or {'cur': 'pls', 'bet': g['bet']}
+    payout = stake_pay(u, s, g['bet'] * cavein_mult(g['caves'], len(g['opened'])), 'cavein', 'cavein')
+    u['cavein'] = None
+    return payout
+
+
+def h_cave_reveal2(u, b):
+    g = u.get('cavein')
+    if not g:
+        raise ApiError('no_cavein', 'Start a Cave-In run first.')
+    s = g.get('stake') or {'cur': 'pls', 'bet': g['bet']}
+    cell = to_int(b.get('cell'), -1)
+    if cell < 0 or cell > 24 or cell in g['opened']:
+        raise ApiError('bad_cell')
+    if cell in g['cells']:
+        view = cavein_view(g, reveal=True)
+        stake_pay(u, s, 0, 'cavein', 'cavein')
+        u['cavein'] = None
+        save()
+        return _luck_out(u, s, {'ok': True, 'hit': True, 'cell': cell, 'game': view, 'payout': 0})
+    g['opened'].append(cell)
+    if len(g['opened']) == 25 - g['caves']:
+        view = cavein_view(g, reveal=True)
+        payout = cave_cashout(u)
+        save()
+        return _luck_out(u, s, {'ok': True, 'hit': False, 'cell': cell, 'game': view, 'cleared': True, 'payout': payout})
+    save()
+    return _luck_out(u, s, {'ok': True, 'hit': False, 'cell': cell, 'game': cavein_view(g)})
+
+
+def h_cave_cashout2(u, b):
+    g = u.get('cavein')
+    if not g:
+        raise ApiError('no_cavein')
+    if not g['opened']:
+        raise ApiError('open_one_first', 'Open at least one tile first.')
+    s = g.get('stake') or {'cur': 'pls', 'bet': g['bet']}
+    view = cavein_view(g, reveal=True)
+    payout = cave_cashout(u)
+    save()
+    return _luck_out(u, s, {'ok': True, 'payout': payout, 'game': view})
+
+
+# ---- High-Low Ore: guess whether the next ore card is higher or lower; cash out any time.
+HL_MAX_STEPS = 20
+HL_MAX_MULT = 1000.0
+CARD_NAMES = ['Pebble', 'Coal', 'Coal Lump', 'Iron Flake', 'Iron', 'Iron Bar', 'Amber', 'Garnet', 'Crystal Shard', 'Crystal',
+              'Sapphire', 'Void Shard', 'Voidstone']
+
+
+def _card(u):
+    (r,), nonce = fair_floats(u, 1)
+    return 1 + int(r * 13), nonce
+
+
+def _hl_view(g):
+    cur = g['cards'][-1]
+    hi, lo = (13 - cur) / 13.0, (cur - 1) / 13.0
+    return {'cards': g['cards'], 'card': cur, 'card_name': CARD_NAMES[cur - 1], 'steps': g['steps'], 'bet': g['bet'],
+            'multiplier': round(g['mult'] * (1 - HOUSE_EDGE), 4) if g['steps'] else 0,
+            'next_higher': round(g['mult'] / hi * (1 - HOUSE_EDGE), 4) if hi > 0 else None,
+            'next_lower': round(g['mult'] / lo * (1 - HOUSE_EDGE), 4) if lo > 0 else None,
+            'currency': g['stake']['cur'], 'ore': g['stake'].get('kind')}
+
+
+def h_hl_start(u, b):
+    if u.get('highlow'):
+        raise ApiError('finish_highlow', 'Finish your High-Low run first.')
+    s = stake_of(u, b)
+    stake_take(u, s, 'highlow')
+    c, nonce = _card(u)
+    u['highlow'] = {'bet': s['bet'], 'stake': s, 'cards': [c], 'mult': 1.0, 'steps': 0, 'nonces': [nonce]}
+    save()
+    return _luck_out(u, s, {'ok': True, 'game': _hl_view(u['highlow'])})
+
+
+def h_hl_guess(u, b):
+    g = u.get('highlow')
+    if not g:
+        raise ApiError('no_highlow', 'Start a High-Low run first.')
+    s = g['stake']
+    guess = b.get('guess')
+    cur = g['cards'][-1]
+    if guess not in ('higher', 'lower') or (guess == 'higher' and cur == 13) or (guess == 'lower' and cur == 1):
+        raise ApiError('bad_guess')
+    p = (13 - cur) / 13.0 if guess == 'higher' else (cur - 1) / 13.0
+    nxt, nonce = _card(u)
+    g['cards'].append(nxt)
+    g['nonces'].append(nonce)
+    win = nxt > cur if guess == 'higher' else nxt < cur
+    if not win:
+        view = _hl_view(g)
+        stake_pay(u, s, 0, 'highlow', 'highlow')
+        u['highlow'] = None
+        save()
+        return _luck_out(u, s, {'ok': True, 'win': False, 'busted': True, 'game': view, 'payout': 0})
+    g['mult'] = min(HL_MAX_MULT, g['mult'] / p)
+    g['steps'] += 1
+    if g['steps'] >= HL_MAX_STEPS or g['mult'] >= HL_MAX_MULT:
+        view = _hl_view(g)
+        payout = stake_pay(u, s, g['bet'] * g['mult'] * (1 - HOUSE_EDGE), 'highlow', 'highlow')
+        u['highlow'] = None
+        save()
+        return _luck_out(u, s, {'ok': True, 'win': True, 'done': True, 'game': view, 'payout': payout})
+    save()
+    return _luck_out(u, s, {'ok': True, 'win': True, 'game': _hl_view(g)})
+
+
+def h_hl_cashout(u, b):
+    g = u.get('highlow')
+    if not g:
+        raise ApiError('no_highlow')
+    if g['steps'] < 1:
+        raise ApiError('guess_first', 'Make at least one right guess first.')
+    s = g['stake']
+    view = _hl_view(g)
+    payout = stake_pay(u, s, g['bet'] * g['mult'] * (1 - HOUSE_EDGE), 'highlow', 'highlow')
+    u['highlow'] = None
+    save()
+    return _luck_out(u, s, {'ok': True, 'payout': payout, 'game': view})
+
+
+def h_hl_state(u, q):
+    g = u.get('highlow')
+    return {'ok': True, 'game': _hl_view(g) if g else None}
+
+
+# ---- Cart Drop: an ore falls through 10 rows of pegs into one of 11 slots.
+DROP_ROWS = 10
+_DROP_SHAPES = {'low': [5.6, 2.1, 1.1, 1.0, 0.5, 0.3, 0.5, 1.0, 1.1, 2.1, 5.6],
+                'medium': [13, 3, 1.3, 0.7, 0.4, 0.2, 0.4, 0.7, 1.3, 3, 13],
+                'high': [76, 10, 3, 0.9, 0.3, 0.2, 0.3, 0.9, 3, 10, 76]}
+
+
+def _binom(n, k):
+    return math.factorial(n) / float(math.factorial(k) * math.factorial(n - k))
+
+
+DROP_PROBS = [_binom(DROP_ROWS, k) / 2 ** DROP_ROWS for k in range(DROP_ROWS + 1)]
+DROP_MULTS = {}
+for _risk, _shape in _DROP_SHAPES.items():
+    _ev = sum(p * m for p, m in zip(DROP_PROBS, _shape))
+    DROP_MULTS[_risk] = [m * (1 - HOUSE_EDGE) / _ev for m in _shape]     # scaled so the return is exactly 97%
+
+
+def h_drop(u, b):
+    s = stake_of(u, b)
+    risk = str(b.get('risk', 'medium'))
+    if risk not in DROP_MULTS:
+        raise ApiError('bad_risk')
+    vals, nonce = fair_floats(u, DROP_ROWS)
+    path = ['R' if v >= 0.5 else 'L' for v in vals]
+    slot = path.count('R')
+    stake_take(u, s, 'cartdrop')
+    mult = DROP_MULTS[risk][slot]
+    payout = stake_pay(u, s, s['bet'] * mult, 'cartdrop', 'cartdrop')
+    save()
+    return _luck_out(u, s, {'ok': True, 'path': path, 'slot': slot, 'multiplier': round(mult, 4), 'win': payout > s['bet'],
+                            'payout': payout, 'nonce': nonce, 'table': [round(m, 2) for m in DROP_MULTS[risk]]})
+
+
+# ---- Three Chests: one is empty, one holds half, one holds 2.41x. Then double-or-nothing (fair 50/50) if you dare.
+CHEST_VALUES = [0.0, 0.5, 2.41]          # average 0.97
+DOUBLE_MULT = 2.0                        # a fair 50/50: the 3% edge was already taken once, on the chest
+CHEST_MAX_DOUBLES = 3
+
+
+def h_chests_start(u, b):
+    if u.get('chests_g'):
+        raise ApiError('finish_chests', 'Finish your chest game first.')
+    s = stake_of(u, b)
+    pick = to_int(b.get('pick'), -1)
+    if pick not in (0, 1, 2):
+        raise ApiError('bad_pick')
+    vals, nonce = fair_floats(u, 2)
+    order = [0, 1, 2]
+    for i in (2, 1):
+        j = int(vals[2 - i] * (i + 1))
+        order[i], order[j] = order[j], order[i]
+    contents = [CHEST_VALUES[k] for k in order]
+    stake_take(u, s, 'chests')
+    won = contents[pick]
+    if won <= 0:
+        stake_pay(u, s, 0, 'chests', 'chests')
+        save()
+        return _luck_out(u, s, {'ok': True, 'pick': pick, 'contents': contents, 'value': 0, 'payout': 0, 'done': True, 'nonce': nonce})
+    u['chests_g'] = {'stake': s, 'bet': s['bet'], 'value': won, 'doubles': 0}
+    save()
+    return _luck_out(u, s, {'ok': True, 'pick': pick, 'contents': contents, 'value': won, 'prize': round(s['bet'] * won, 2),
+                            'can_double': True, 'nonce': nonce})
+
+
+def h_chests_double(u, b):
+    g = u.get('chests_g')
+    if not g:
+        raise ApiError('no_chests')
+    s = g['stake']
+    (r,), nonce = fair_floats(u, 1)
+    if r < 0.5:
+        g['value'] *= DOUBLE_MULT
+        g['doubles'] += 1
+        if g['doubles'] >= CHEST_MAX_DOUBLES:
+            payout = stake_pay(u, s, g['bet'] * g['value'], 'chests', 'chests')
+            u['chests_g'] = None
+            save()
+            return _luck_out(u, s, {'ok': True, 'win': True, 'done': True, 'payout': payout, 'roll': round(r, 6), 'nonce': nonce})
+        save()
+        return _luck_out(u, s, {'ok': True, 'win': True, 'value': round(g['value'], 4), 'prize': round(g['bet'] * g['value'], 2),
+                                'doubles_left': CHEST_MAX_DOUBLES - g['doubles'], 'roll': round(r, 6), 'nonce': nonce})
+    stake_pay(u, s, 0, 'chests', 'chests')
+    u['chests_g'] = None
+    save()
+    return _luck_out(u, s, {'ok': True, 'win': False, 'done': True, 'payout': 0, 'roll': round(r, 6), 'nonce': nonce})
+
+
+def h_chests_take(u, b):
+    g = u.get('chests_g')
+    if not g:
+        raise ApiError('no_chests')
+    s = g['stake']
+    payout = stake_pay(u, s, g['bet'] * g['value'], 'chests', 'chests')
+    u['chests_g'] = None
+    save()
+    return _luck_out(u, s, {'ok': True, 'payout': payout, 'done': True})
+
+
+# ---- Lucky Wheel: 20 segments, average 0.97x. Plus one free daily spin that pays ore only.
+WHEEL = [0, 0, 0, 0, 0, 0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1, 1.5, 1.5, 2, 3.4, 5]
+FREE_WHEEL = [('coal', 5), ('coal', 10), ('coal', 20), ('iron', 5), ('iron', 10), ('coal', 5), ('iron', 15), ('crystal', 2),
+              ('coal', 10), ('crystal', 5), ('iron', 5), ('gem', 1)]
+
+
+def _wheel_order(seed_key):
+    order = list(range(len(WHEEL)))
+    random.Random(_seed('wheel', seed_key)).shuffle(order)
+    return order
+
+
+WHEEL_LAYOUT = [WHEEL[i] for i in _wheel_order('layout-v1')]   # the order the segments are painted in
+
+
+def h_wheel(u, b):
+    s = stake_of(u, b)
+    (r,), nonce = fair_floats(u, 1)
+    seg = int(r * len(WHEEL_LAYOUT))
+    mult = WHEEL_LAYOUT[seg]
+    stake_take(u, s, 'wheel')
+    payout = stake_pay(u, s, s['bet'] * mult, 'wheel', 'wheel')
+    save()
+    return _luck_out(u, s, {'ok': True, 'segment': seg, 'multiplier': mult, 'payout': payout, 'win': payout > s['bet'],
+                            'layout': WHEEL_LAYOUT, 'roll': round(r, 6), 'nonce': nonce})
+
+
+def h_wheel_free(u, b):
+    if day_count(u, 'free_spin') > 0:
+        raise ApiError('spun', 'Your free spin is back tomorrow.')
+    day_add(u, 'free_spin')
+    (r,), nonce = fair_floats(u, 1)
+    seg = int(r * len(FREE_WHEEL))
+    kind, n = FREE_WHEEL[seg]
+    if kind == 'gem':
+        g = random.Random(_seed('freegem', u['uid'], day_key())).choice(['amber', 'garnet'])
+        u['gems'][g] += 1
+        prize = {'gem': g}
+    else:
+        u['ore'][kind] += n
+        prize = {'ore': kind, 'qty': n}
+    save()
+    return {'ok': True, 'segment': seg, 'prize': prize, 'free_layout': [{'ore': k, 'qty': q} for k, q in FREE_WHEEL],
+            'ore_inv': u['ore'], 'nonce': nonce, 'server_hash': u['fair']['server_hash']}
+
+
+def h_luck_info(u, q):
+    gd = game_of_the_day()
+    return {'ok': True, 'house_edge': HOUSE_EDGE, 'min_bet': MIN_BET, 'max_bet': MAX_BET, 'ore_max_bet': LUCK_ORE_MAX,
+            'drop': {k: [round(m, 2) for m in v] for k, v in DROP_MULTS.items()}, 'drop_probs': [round(p, 5) for p in DROP_PROBS],
+            'wheel': WHEEL_LAYOUT, 'free_wheel': [{'ore': k, 'qty': n} for k, n in FREE_WHEEL],
+            'free_spin_ready': day_count(u, 'free_spin') == 0, 'chests': CHEST_VALUES, 'double': DOUBLE_MULT,
+            'highlow': _hl_view(u['highlow']) if u.get('highlow') else None,
+            'chests_open': {'value': round(u['chests_g']['value'], 4), 'bet': u['chests_g']['bet']} if u.get('chests_g') else None,
+            'gotd_luck': gd['luck'], 'cards': CARD_NAMES, 'fair': fair_view(u)}
+
+
+# Rotating the provable-fair seed must wait for every open luck run to finish.
+_v53_fair_seed = h_fair_seed
+def h_fair_seed(u, b):
+    if u.get('highlow') or u.get('chests_g'):
+        raise ApiError('finish_run', 'Finish your open High-Low or chest game first.')
+    return _v53_fair_seed(u, b)
+
+
+GET_AUTH.update({'/games': h_games, '/luck/info': h_luck_info, '/luck/highlow': h_hl_state})
+POST_AUTH.update({'/luck/flip': h_flip2, '/luck/dice': h_dice2, '/luck/cavein/start': h_cave_start2,
+                  '/luck/cavein/reveal': h_cave_reveal2, '/luck/cavein/cashout': h_cave_cashout2,
+                  '/luck/highlow/start': h_hl_start, '/luck/highlow/guess': h_hl_guess, '/luck/highlow/cashout': h_hl_cashout,
+                  '/luck/drop': h_drop, '/luck/chests/start': h_chests_start, '/luck/chests/double': h_chests_double,
+                  '/luck/chests/take': h_chests_take, '/luck/wheel': h_wheel, '/luck/wheel/free': h_wheel_free,
+                  '/luck/seed': h_fair_seed})
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------
