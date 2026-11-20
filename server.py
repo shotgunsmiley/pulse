@@ -4816,6 +4816,130 @@ def _v51_do_POST(self):
     _v5_do_POST2(self)
 Handler.do_POST = _v51_do_POST
 
+# ===========================================================================
+# v5.2 BALANCE - found by a simulated week of real play (out/sim_week.py)
+# ===========================================================================
+# With PLS coming only from node time (about 10-20 PLS a day for a normal player),
+# the old prices were made for the classic economy and walled players off:
+#   - an Iron Pickaxe cost 40 PLS, so casual players never forged one all week,
+#     stayed locked out of the Crystal Grotto, and piled up thousands of useless iron;
+#   - gear lost 1 durability per strike, so it broke within a session, and a full
+#     iron repair cost 30 PLS (10 days of a casual player's earnings);
+#   - the weekly cup cost 50 PLS to enter.
+# New rules (only when PLS comes from nodes; the classic economy is unchanged):
+#   - gear costs about a quarter of the PLS and lasts four times longer;
+#   - repairs are paid mostly in ore (iron gear: ore only), which also soaks up the ore pile.
+#     Ore of the gear's tier OR BETTER counts (once you mine crystal you stop getting iron);
+#   - upgrades need real amounts of ore;
+#   - the weekly cup costs 20 PLS.
+V52_BALANCE = MINT_POLICY != 'classic'
+GEAR_PLS = {'iron': 10, 'crystal': 35, 'void': 90}
+GEAR_DUR = {'iron': 600, 'crystal': 1200, 'void': 2400}
+REPAIR_PLS_RATE = {'iron': 0.0, 'crystal': 0.005, 'void': 0.01}
+REPAIR_ORE = {'iron': ('iron', 4), 'crystal': ('crystal', 8), 'void': ('void', 16)}   # 1 ore per N durability
+UPGRADE_ORE_STEP = 25
+T_ENTRY_NODES = 20
+
+if V52_BALANCE:
+    for _rid, _r in RECIPES.items():
+        _r['cost_pls'] = GEAR_PLS[_r['tier']]
+        _r['durability'] = GEAR_DUR[_r['tier']]
+    T_ENTRY = T_ENTRY_NODES
+
+
+def _rescale_gear(u):
+    """Gear forged under the old rules gets the new, longer durability (same fraction left)."""
+    if not V52_BALANCE:
+        return
+    for g in u.get('gear', {}).values():
+        new_max = GEAR_DUR.get(g.get('tier'), 0)
+        if new_max and g.get('max_dur', 0) < new_max:
+            frac = g.get('dur', 0) / float(max(1, g.get('max_dur', 1)))
+            g['max_dur'] = new_max
+            g['dur'] = int(round(new_max * frac))
+
+
+def repair_quote(g):
+    missing = max(0, g['max_dur'] - g['dur'])
+    if not V52_BALANCE:
+        return {'pls': int(math.ceil(missing * REPAIR_RATE[g['tier']])), 'ore': {}}
+    ore, per = REPAIR_ORE[g['tier']]
+    return {'pls': int(math.ceil(missing * REPAIR_PLS_RATE[g['tier']])), 'ore': {ore: int(math.ceil(missing / float(per)))} if missing else {}}
+
+
+ORE_LADDER = ['coal', 'iron', 'crystal', 'void']
+
+
+def repair_ore_plan(u, need):
+    """Pay a repair with the named ore first, then better ore. None if the player cannot cover it."""
+    plan = {}
+    for k, n in need.items():
+        left = n
+        for o in ORE_LADDER[ORE_LADDER.index(k):]:
+            take = min(left, u['ore'].get(o, 0) - plan.get(o, 0))
+            if take > 0:
+                plan[o] = plan.get(o, 0) + take
+                left -= take
+            if left <= 0:
+                break
+        if left > 0:
+            return None
+    return plan
+
+
+_v51_upgrade_cost = upgrade_cost
+def upgrade_cost(g):
+    out = _v51_upgrade_cost(g)
+    if V52_BALANCE:
+        out['ore'] = {k: UPGRADE_ORE_STEP * (g.get('stars', 0) + 1) for k in out['ore']}
+    return out
+
+
+_v51_gear_view = gear_view
+def gear_view(u):
+    _rescale_gear(u)
+    out = _v51_gear_view(u)
+    for slot, g in u['gear'].items():
+        q = repair_quote(g)
+        out[slot]['repair_cost'] = q['pls']
+        out[slot]['repair_ore'] = q['ore']
+        out[slot]['can_repair'] = repair_ore_plan(u, q['ore']) is not None and u['balance'] >= q['pls']
+        out[slot]['needs_repair'] = g['dur'] < g['max_dur']
+    return out
+
+
+_v51_wear = wear
+def wear(u, slot):
+    _rescale_gear(u)
+    _v51_wear(u, slot)
+
+
+def h_repair(u, b):
+    g = u['gear'].get(b.get('slot'))
+    if not g:
+        raise ApiError('no_gear')
+    _rescale_gear(u)
+    if g['dur'] >= g['max_dur']:
+        raise ApiError('not_damaged', 'That gear is already in perfect shape.')
+    q = repair_quote(g)
+    plan = repair_ore_plan(u, q['ore'])
+    if plan is None:
+        k, n = next(iter(q['ore'].items()))
+        raise ApiError('not_enough_ore', 'Repairing needs %d %s ore (or better ore).' % (n, k))
+    if u['balance'] < q['pls']:
+        raise ApiError('insufficient_pls', 'Not enough PLS.')
+    pay_ore(u, plan)
+    if q['pls'] > 0:
+        move(U(u['uid']), 'burn', q['pls'], 'repair', g['recipe'])
+    g['dur'] = g['max_dur']
+    bump(u, 'smith')
+    save()
+    return {'ok': True, 'cost': q['pls'], 'ore': q['ore'], 'profile': profile_view(u)}
+
+
+POST_AUTH.update({'/repair': h_repair})
+VERSION = 5.2
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------

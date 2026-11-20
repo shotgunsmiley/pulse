@@ -56,8 +56,17 @@ func _render() -> void:
 		UI.add_label(card, "Durability %s / %s" % [UI.n(g["dur"]), UI.n(g["max_dur"])], 18, UI.WHITE)
 		var row := UI.add_row(card)
 		var rc := int(g.get("repair_cost", 0))
-		var rep := UI.add_button(row, "REPAIR (%d PLS)" % rc if rc > 0 else "LIKE NEW", "teal", 56, 20)
-		rep.disabled = rc <= 0 or float(p.get("balance", 0)) < rc
+		var rore: Dictionary = g.get("repair_ore", {})
+		var needs: bool = g.get("needs_repair", rc > 0)
+		var cost_parts := []
+		if rc > 0:
+			cost_parts.append("%d PLS" % rc)
+		for k in rore.keys():
+			cost_parts.append("%s %s" % [UI.n(rore[k]), UI.ore_name(k).to_lower()])
+		var rep := UI.add_button(row, ("REPAIR (%s)" % " + ".join(PackedStringArray(cost_parts))) if needs else "LIKE NEW", "teal", 56, 20)
+		rep.disabled = not needs or not g.get("can_repair", float(p.get("balance", 0)) >= rc)
+		if needs and not rore.is_empty():
+			UI.add_label(card, "Repairs take ore of this tier or better.", 15, UI.MUTED)
 		rep.pressed.connect(func(): _act("/repair", {"slot": slot}, "Repaired!"))
 		var up = g.get("upgrade_cost")
 		if up != null:

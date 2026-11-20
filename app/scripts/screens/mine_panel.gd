@@ -72,6 +72,7 @@ var challenge_id := ""
 var active := false
 var busy := false
 var gen := 0
+var broken_seen := {}     # gear slots already reported broken (so the warning shows once)
 
 
 func init(m) -> void:
@@ -176,6 +177,18 @@ func _new_challenge() -> void:
 	if not active or my_gen != gen:
 		return
 	if not r.get("ok", false):
+		if str(r.get("error", "")) == "vein_locked":
+			# usually a pickaxe that just broke: go back to the best vein still open
+			await _load_veins()
+			var best := 1
+			for v in veins:
+				if v.get("unlocked", false):
+					best = maxi(best, int(v["id"]))
+			M.toast("%s  Back to a vein you can mine." % str(r.get("message", "That vein is locked.")), UI.AMBER)
+			M.log_msg("That vein needs better gear - mining the %s instead." % str(_vein(best).get("name", "coal seam")), UI.AMBER)
+			if best != tier:
+				select_tier(best)
+			return
 		M.error_toast(r)
 		return
 	challenge_id = str(r["id"])
@@ -225,7 +238,9 @@ func _on_strike() -> void:
 func _show_result(r: Dictionary) -> void:
 	var q := str(r["quality"])
 	bar.result_q = q
+	var xp_before := int(M.profile.get("xp", 0))
 	M.apply(r)
+	var xp_gain := maxi(0, int(M.profile.get("xp", 0)) - xp_before)
 	var colors := {"perfect": UI.GOLD, "great": UI.TEAL_L, "good": UI.TEAL, "miss": UI.RED}
 	var text := q.to_upper() + "!"
 	var w = M.world
@@ -245,6 +260,8 @@ func _show_result(r: Dictionary) -> void:
 		text += "  +%s %s   (%s damage)" % [UI.n(got), UI.ore_name(str(r["ore"])), UI.n(r["damage"])]
 		M.vibrate(30 if q == "perfect" else 18)
 		w.ore_fly(tier, mini(got, 8))
+		w.xp_drop(tier, xp_gain, got, UI.ore_name(str(r["ore"])).to_lower())
+		M.log_msg("%s strike: +%d %s, +%d xp" % [q.capitalize(), got, UI.ore_name(str(r["ore"])).to_lower(), xp_gain], colors.get(q, UI.WHITE))
 	w.vein_damage(tier, float(r["vein_hp"]) / maxf(1.0, float(r["vein_max"])))
 	var streak := int(r.get("streak", 0))
 	var combo := float(r.get("combo", 1.0))
@@ -255,6 +272,7 @@ func _show_result(r: Dictionary) -> void:
 		streak_label.text = ""
 	if r.get("gem") != null:
 		M.toast("A %s glitters in the rubble!  +1 gem" % str(r["gem"]).to_upper(), UI.GOLD)
+		M.log_msg("You found a %s!" % str(r["gem"]), UI.GOLD)
 		M.play("rare")
 		M.vibrate(90)
 	for b in r.get("new_badges", []):
@@ -270,15 +288,21 @@ func _show_result(r: Dictionary) -> void:
 		M.play("coin")
 		M.vibrate(80)
 		w.vein_cleared(tier)
+		M.log_msg("The %s is cleared. It grows back in a moment." % str(_vein(tier).get("name", "vein")).to_lower(), UI.GOLD)
 	if r.get("level_up", false):
 		M.toast("LEVEL UP!  Lv %s %s" % [UI.n(r["level"]), str(r["title"])], UI.GOLD)
 		M.play("levelup")
 		M.vibrate(120)
+		w.level_up_fx(int(r["level"]))
+		M.log_msg("Congratulations - you reached mining level %s!" % UI.n(r["level"]), UI.GOLD)
 		_load_veins()
 	var gear: Dictionary = r.get("gear", {})
 	for slot in gear.keys():
-		if gear[slot].get("broken", false):
+		var broken: bool = gear[slot].get("broken", false)
+		if broken and not broken_seen.get(slot, false):
 			M.toast("Your %s broke! Repair it at the Forge." % str(gear[slot]["name"]), UI.RED)
+			M.log_msg("Your %s broke. Repair it at the Forge (mostly ore)." % str(gear[slot]["name"]).to_lower(), UI.RED)
+		broken_seen[slot] = broken
 
 
 func _show_events(ev: Dictionary) -> void:

@@ -10,6 +10,7 @@ signal place_tapped(place: String)
 signal vein_tapped(tier: int)
 signal arrived(place: String)
 signal intro_finished
+signal examined(text: String)          # long-press on something: a line for the game log
 
 const MD = preload("res://scripts/model_data.gd")
 const MB = preload("res://scripts/mesh_builder.gd")
@@ -17,6 +18,26 @@ const HeroScript = preload("res://scripts/hero.gd")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const WATER_SHADER = preload("res://shaders/water.gdshader")
 const CLOUDS = preload("res://textures/clouds.png")
+const PixelFont = preload("res://scripts/pixel_font.gd")
+const PLACE_NAMES := {"mine": "The Deep Veins", "forge": "Forge", "arena": "Arena", "hall": "Hall of Chance",
+	"tavern": "Tavern", "board": "Notice Board", "market": "Market", "network": "Pulse Crystal"}
+# long-press "examine" lines
+const EXAMINE := {
+	"mine": "The way down to the Deep Veins. Warm air drifts up the shaft.",
+	"forge": "The smithy. Ore and a few PLS become a pickaxe here.",
+	"arena": "Sand, banners and old sword scratches. Duels are fair here - gear stays outside.",
+	"hall": "The Hall of Chance. Provably fair, still a gamble.",
+	"tavern": "Warm, loud, smells of stew. Miners swap news and challenges here.",
+	"board": "Notices, bounties and the week's cup.",
+	"market": "Stalls where miners trade gems, fish and ore.",
+	"network": "The Pulse Crystal. It flares every time a phone on the network checks in.",
+	"vein1": "A coal seam. Soft, black and everywhere.",
+	"vein2": "An iron vein streaked with rust. Needs mining level 3.",
+	"vein3": "Pulse crystal grows here. Needs level 8 and an iron pickaxe.",
+	"vein4": "A rift of void stone. It hums. Needs level 15 and a crystal pickaxe.",
+	"hero": "That's you. Ore dust in your hair, as it should be.",
+	"ground": "Packed earth. Nothing interesting.",
+}
 
 const PLACES := {"mine": "town_mine", "forge": "town_forge", "arena": "town_arena", "hall": "town_gambit_hall",
 	"tavern": "town_tavern", "board": "town_board", "market": "town_market", "network": "town_network"}
@@ -50,6 +71,9 @@ var input_enabled := true
 var _press_pos := Vector2.ZERO
 var _dragged := false
 var _pressed := false
+var _press_ms := 0
+var signs: Array = []
+var headlamp: OmniLight3D = null
 
 var flickers := []         # [{"l": OmniLight3D, "base": float, "kind": String, "seed": float}]
 var monument_light: OmniLight3D = null
@@ -231,13 +255,39 @@ func show_area(area_name: String, opts: Dictionary = {}) -> void:
 			cam_height = 3.1
 		else:
 			var deep := float(opts.get("floor", 0))
-			env.background_color = Color("#0c0a09") if area_name == "expedition" else Color("#120e0b")
-			env.ambient_light_color = Color("#8f8270").darkened(clampf(deep * 0.03, 0.0, 0.45))
-			env.ambient_light_energy = 0.7
+			# v5.2: lighter caves - the old values made the mine and lake hard to read on a phone
+			env.background_color = Color("#14100d") if area_name == "expedition" else Color("#1e1712")
+			env.ambient_light_color = Color("#a99a84").darkened(clampf(deep * 0.03, 0.0, 0.4))
+			env.ambient_light_energy = 1.9
 			env.fog_light_color = env.background_color
-			env.fog_depth_begin = maxf(3.0, 8.0 - deep * 0.3)
-			env.fog_depth_end = maxf(11.0, 22.0 - deep * 0.6)
+			env.fog_depth_begin = maxf(5.0, 11.0 - deep * 0.3)
+			env.fog_depth_end = maxf(14.0, 28.0 - deep * 0.6)
 			env.fog_depth_curve = 1.2
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = 1.0 if town else (1.0 if area_name == "cabin" else 1.25)
+	# a warm lamp on the miner's belt so the ground around you is always readable underground
+	if headlamp == null:
+		headlamp = OmniLight3D.new()
+		headlamp.light_color = Color("#ffd9a0")
+		headlamp.omni_range = 8.5
+		headlamp.light_energy = 1.6
+		headlamp.position = Vector3(0, 2.2, 0.6)
+		hero.add_child(headlamp)
+	headlamp.visible = area_name in ["mine", "lake"]
+	if area_name in ["mine", "lake", "expedition"]:
+		# daylight falling down the exit shaft by the ladder
+		var shaft := OmniLight3D.new()
+		shaft.light_color = Color("#cfe0ff")
+		shaft.omni_range = 9.0
+		shaft.light_energy = 1.5
+		shaft.position = Vector3(0, 4.5, 8.0) if area_name == "mine" else Vector3(6.0, 4.5, 4.8)
+		area_root.add_child(shaft)
+	env.adjustment_enabled = true
+	env.adjustment_brightness = 1.0
+	env.adjustment_contrast = 1.06
+	env.adjustment_saturation = 1.12 if town else 1.05
+	if town:
+		_build_signs()
 	if area_name == "lake":
 		_build_water()
 	if area_name == "expedition":
@@ -583,9 +633,24 @@ func vein_cleared(tier: int) -> void:
 	vein_cracks[tier] = []
 	var v = vein_nodes.get(tier)
 	if v != null:
-		(v as Node3D).scale = Vector3(0.3, 0.3, 0.3)
+		# depleted: the vein is gone, a grey stump is left, then fresh ore grows back
+		var vn := v as Node3D
+		vn.visible = false
+		var stump := MB.instance("rock%d" % (tier % 3))
+		stump.position = vn.position + Vector3(0, -0.05, 0)
+		stump.scale = Vector3(0.55, 0.4, 0.55)
+		area_root.add_child(stump)
+		float_text(vn.position + Vector3(0, 1.0, 0), "Vein cleared!", Color("#ffd36b"), 2, 0.6, 1.3)
 		var tw := create_tween()
-		tw.tween_property(v, "scale", Vector3.ONE, 0.6).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_interval(1.1)
+		tw.tween_callback(func():
+			if is_instance_valid(stump):
+				stump.queue_free()
+			if is_instance_valid(vn):
+				vn.visible = true
+				vn.scale = Vector3(0.25, 0.25, 0.25)
+				_burst(vn.position + Vector3(0, 0.9, 0), ORE_COLORS.get(tier, Color.WHITE), 12, 2.0, 0.05, true, 0.8))
+		tw.tween_property(vn, "scale", Vector3.ONE, 0.7).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	hero.cheer()
 
 
@@ -1016,6 +1081,16 @@ func _cam_target() -> Vector3:
 	var c := _cam_raw()
 	if area == "cabin":
 		c = Vector3(clampf(c.x, -4.2, 4.2), minf(c.y, 3.3), clampf(c.z, -4.2, 4.2))
+	elif area in ["mine", "lake", "expedition"]:
+		# the cave walls ring the centre (0, -1) at about 11 m and the exit ladder stands at
+		# about 9.6 m; keep the camera inside both and lift it a little when it is pulled in
+		var cen := Vector2(0.0, -1.0)
+		var flat := Vector2(c.x, c.z) - cen
+		var lim := 8.9
+		if flat.length() > lim:
+			var over := flat.length() - lim
+			flat = flat.normalized() * lim
+			c = Vector3(flat.x + cen.x, c.y + minf(1.6, over * 0.5), flat.y + cen.y)
 	return c
 
 
@@ -1100,9 +1175,13 @@ func _unhandled_input(event) -> void:
 			_pressed = true
 			_press_pos = event.position
 			_dragged = false
+			_press_ms = Time.get_ticks_msec()
 		else:
 			if _pressed and not _dragged:
-				_tap(event.position)
+				if Time.get_ticks_msec() - _press_ms >= 450:
+					_examine(event.position)
+				else:
+					_tap(event.position)
 			_pressed = false
 	elif event is InputEventMouseMotion and _pressed:
 		if event.position.distance_to(_press_pos) > 18.0:
@@ -1132,4 +1211,175 @@ func _tap(pos: Vector2) -> void:
 	var dir := camera.project_ray_normal(pos)
 	if dir.y < -0.01:
 		var tt := -origin.y / dir.y
-		walk_to_point(origin + dir * tt)
+		var at := origin + dir * tt
+		tap_marker(at)
+		walk_to_point(at)
+
+
+# ================================================================== v5.2 polish
+# Floating text over the world: XP drops, ore gained, hit quality. Pixel font, rises and fades.
+func float_text(at: Vector3, text: String, color: Color, scale_px: int = 2, rise: float = 1.2, life: float = 1.1) -> void:
+	var l := Label3D.new()
+	l.text = text
+	# (the bitmap pixel font drops thin glyphs in 3D, so floating text uses the regular font)
+	l.font_size = 20 * scale_px
+	l.pixel_size = 0.0045
+	l.modulate = color
+	l.outline_size = 10
+	l.outline_modulate = Color(0, 0, 0, 0.9)
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.no_depth_test = true
+	l.fixed_size = false
+	l.render_priority = 5
+	l.position = at
+	add_child(l)
+	var tw := l.create_tween()
+	tw.tween_property(l, "position", at + Vector3(0, rise, 0), life).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(l, "modulate:a", 0.0, life * 0.45).set_delay(life * 0.55)
+	tw.tween_callback(l.queue_free)
+
+
+# After a strike: "+4 xp" rises from the miner's head, "+3 coal" pops off the rock.
+func xp_drop(tier: int, xp: int, ore: int, ore_name: String) -> void:
+	if xp > 0:
+		float_text(hero.position + Vector3(0.0, 1.9, 0.0), "+%d xp" % xp, Color("#9be8ff"), 2, 0.55, 1.0)
+	if ore > 0:
+		var c: Color = ORE_COLORS.get(tier, Color.WHITE)
+		if tier <= 2:
+			c = Color("#e8d8c0") if tier == 2 else Color("#cfcac2")
+		float_text(_vein_point(tier) + Vector3(randf_range(-0.2, 0.2), 0.1, 0), "+%d %s" % [ore, ore_name], c, 2, 0.6, 1.1)
+
+
+# Level up: rockets shoot up around the miner and burst in colour.
+func level_up_fx(level: int) -> void:
+	hero.cheer()
+	float_text(hero.position + Vector3(0, 1.4, 0), "LEVEL %d!" % level, Color("#ffd36b"), 3, 0.8, 2.4)
+	var colors := [Color("#ffd36b"), Color("#7fe3d3"), Color("#ff8a6a"), Color("#b48cf0"), Color("#9be8ff")]
+	for i in range(5):
+		var a := TAU * i / 5.0 + randf() * 0.4
+		var start: Vector3 = hero.position + Vector3(cos(a) * 0.9, 0.3, sin(a) * 0.9)
+		var top: Vector3 = start + Vector3(cos(a) * 0.7, randf_range(1.5, 2.3), sin(a) * 0.7)
+		var rocket := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.08, 0.2, 0.08)
+		var m := StandardMaterial3D.new()
+		m.albedo_color = colors[i]
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		bm.material = m
+		rocket.mesh = bm
+		rocket.position = start
+		area_root.add_child(rocket)
+		var tw := rocket.create_tween()
+		tw.tween_interval(i * 0.18)
+		tw.tween_property(rocket, "position", top, 0.55).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		var col: Color = colors[i]
+		tw.tween_callback(func():
+			_burst(rocket.position, col, 26, 4.0, 0.07, true, 1.1)
+			_burst(rocket.position, Color.WHITE, 8, 2.0, 0.04, true, 0.6)
+			rocket.queue_free())
+	shake = maxf(shake, 0.12)
+
+
+# A ring on the ground where you tapped to walk.
+func tap_marker(at: Vector3) -> void:
+	var ring := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = 0.26
+	tm.outer_radius = 0.34
+	tm.rings = 16
+	tm.ring_segments = 4
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color("#7fe3d3")
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	tm.material = m
+	ring.mesh = tm
+	ring.scale = Vector3(1, 0.15, 1)
+	ring.position = Vector3(at.x, at.y + 0.05, at.z)
+	area_root.add_child(ring)
+	var tw := ring.create_tween()
+	tw.tween_property(ring, "scale", Vector3(0.35, 0.15, 0.35), 0.55).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.parallel().tween_property(m, "albedo_color:a", 0.0, 0.55)
+	tw.tween_callback(ring.queue_free)
+
+
+# Wooden signposts in front of each building, facing the town square.
+func _build_signs() -> void:
+	signs.clear()
+	var seen := {}
+	for p in pickables:
+		if p["kind"] != "place" or seen.has(p["id"]):
+			continue
+		seen[p["id"]] = true
+		var id: String = p["id"]
+		if id == "network":
+			continue
+		var spot_d: Dictionary = MD.SPOTS.get(PLACES.get(id, ""), {})
+		if spot_d.is_empty():
+			continue
+		# stand the sign just beside the walk-up spot, towards the building, facing the square
+		var sp: Vector3 = _vec(spot_d["p"])
+		var lk: Vector3 = _vec(spot_d["look"])
+		var to_b := (lk - sp)
+		to_b.y = 0
+		to_b = to_b.normalized()
+		var side := to_b.cross(Vector3.UP).normalized()
+		var at := sp + to_b * 1.1 + side * 1.25
+		var post := Node3D.new()
+		post.position = at
+		area_root.add_child(post)
+		var wood := StandardMaterial3D.new()
+		wood.albedo_color = Color("#6b4a2e")
+		var dark := StandardMaterial3D.new()
+		dark.albedo_color = Color("#3f2a18")
+		var pole := MeshInstance3D.new()
+		var pm := BoxMesh.new()
+		pm.size = Vector3(0.12, 1.9, 0.12)
+		pm.material = dark
+		pole.mesh = pm
+		pole.position = Vector3(0, 0.95, 0)
+		post.add_child(pole)
+		var board := MeshInstance3D.new()
+		var bmesh := BoxMesh.new()
+		var name: String = PLACE_NAMES.get(id, id.capitalize())
+		bmesh.size = Vector3(0.24 + 0.115 * name.length(), 0.42, 0.07)
+		bmesh.material = wood
+		board.mesh = bmesh
+		board.position = Vector3(0, 1.75, 0)
+		post.add_child(board)
+		for side_z in [0.045, -0.045]:
+			var l := Label3D.new()
+			l.text = name
+			l.font_size = 46
+			l.pixel_size = 0.0052
+			l.modulate = Color("#ffe6b0")
+			l.outline_size = 8
+			l.outline_modulate = Color("#2a1a0c")
+			l.double_sided = false
+			l.position = Vector3(0, 1.75, side_z)
+			if side_z < 0:
+				l.rotation.y = PI
+			post.add_child(l)
+		# face the town square (the crystal at the centre)
+		var face_dir := -Vector3(at.x, 0, at.z).normalized()
+		post.rotation.y = atan2(face_dir.x, face_dir.z)
+		signs.append(post)
+
+
+# Long-press: tell the player what they are looking at.
+func _examine(pos: Vector2) -> void:
+	var best = null
+	var best_d := 150.0
+	for p in pickables:
+		if camera.is_position_behind(p["pos"]):
+			continue
+		var d := camera.unproject_position(p["pos"]).distance_to(pos)
+		if d < best_d:
+			best_d = d
+			best = p
+	var key := "ground"
+	if hero and not camera.is_position_behind(hero.position + Vector3(0, 1, 0)) and camera.unproject_position(hero.position + Vector3(0, 1, 0)).distance_to(pos) < minf(best_d, 90.0):
+		key = "hero"
+	elif best != null:
+		key = (str(best["id"]) if best["kind"] == "place" else "vein%d" % int(best["id"]))
+	examined.emit(EXAMINE.get(key, EXAMINE["ground"]))

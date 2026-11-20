@@ -24,6 +24,8 @@ const SCREENS := {
 	"network": preload("res://scripts/screens/network.gd"),
 }
 const TutorialScript = preload("res://scripts/tutorial.gd")
+const MinimapScript = preload("res://scripts/minimap.gd")
+const PixelFont = preload("res://scripts/pixel_font.gd")
 const LOW_PANELS := ["mine", "expedition", "fishing", "cabin"]
 const TIER_PITCH := {1: 0.85, 2: 1.0, 3: 1.25, 4: 0.7}
 const BADGE_NAMES := {"founding": "Founding Miner", "first_vein": "First Crack", "veins_100": "Seasoned Miner",
@@ -61,6 +63,8 @@ var hero_key := ""
 var pending_challenge := ""
 var pet_key := "-"
 var tutorial = null
+var msg_log: VBoxContainer = null     # the game log: last few lines of what just happened
+var minimap = null
 var last_payday_epoch := -1
 var audio    # audio.gd: ambience and music
 
@@ -80,6 +84,7 @@ func _ready() -> void:
 	add_child(world)
 	world.place_tapped.connect(go)
 	world.vein_tapped.connect(_on_vein_tapped)
+	world.examined.connect(func(t: String): log_msg(t, UI.TEAL_L))
 	node.pulsed.connect(func(_c): world.network_pulse())
 	audio = preload("res://scripts/audio.gd").new()
 	add_child(audio)
@@ -227,6 +232,7 @@ func enter_game(prof: Dictionary, me: Dictionary = {}) -> void:
 		tutorial.offset_right = -16
 		tutorial.finished.connect(func(): tutorial = null)
 		ui_root.add_child(tutorial)
+		tutorial.on_screen(current)
 
 
 func _set_hud_visible(v: bool) -> void:
@@ -278,6 +284,7 @@ func _build_hud() -> void:
 	toast_label.visible = false
 	toast_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	content.add_child(toast_label)
+	_build_world_overlay()
 	nav_bar = PanelContainer.new()
 	nav_bar.add_theme_stylebox_override("panel", UI.box(Color("#1f2328"), UI.OUTLINE, 4))
 	layout.add_child(nav_bar)
@@ -435,6 +442,7 @@ func open_panel(pname: String) -> void:
 		holder.add_child(screen)
 		content.move_child(toast_label, content.get_child_count() - 1)
 	current = pname
+	_place_world_overlay()
 	world.low_frame = pname in LOW_PANELS
 	node.set_active(pname == "mine" or pname == "expedition")
 	tutorial_event("open_" + pname)
@@ -450,6 +458,9 @@ func close_panel() -> void:
 	current = ""
 	world.low_frame = false
 	node.set_active(false)
+	if tutorial != null and is_instance_valid(tutorial):
+		tutorial.on_screen("")
+	_place_world_overlay()
 	if screen != null:
 		screen.on_close()
 		var holder = screen.get_parent()
@@ -486,6 +497,69 @@ func toast(text: String, color: Color = UI.WHITE) -> void:
 	tw.tween_interval(2.4)
 	tw.tween_property(toast_label, "modulate:a", 0.0, 0.5)
 	tw.tween_callback(func(): toast_label.visible = false)
+
+
+# ---------------------------------------------------------------- game log + minimap
+func _build_world_overlay() -> void:
+	msg_log = VBoxContainer.new()
+	msg_log.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	msg_log.alignment = BoxContainer.ALIGNMENT_END
+	msg_log.add_theme_constant_override("separation", 2)
+	msg_log.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	content.add_child(msg_log)
+	minimap = MinimapScript.new()
+	minimap.setup(self)
+	minimap.anchor_left = 1.0
+	minimap.anchor_right = 1.0
+	minimap.offset_left = -minimap.custom_minimum_size.x - 12
+	minimap.offset_right = -12
+	minimap.offset_top = 12
+	minimap.offset_bottom = 12 + minimap.custom_minimum_size.y
+	content.add_child(minimap)
+	_place_world_overlay()
+
+
+# The log sits just above whatever covers the bottom of the world view.
+func _place_world_overlay() -> void:
+	if msg_log == null:
+		return
+	var low := current in LOW_PANELS
+	var full := current != "" and not low
+	msg_log.visible = not full
+	minimap.visible = not full and world.area != "cabin"
+	var y := 0.52 if low else 1.0
+	msg_log.anchor_left = 0.0
+	msg_log.anchor_right = 0.78
+	msg_log.anchor_top = y
+	msg_log.anchor_bottom = y
+	msg_log.offset_left = 14
+	msg_log.offset_right = 0
+	msg_log.offset_bottom = -2 if low else -10
+	msg_log.offset_top = msg_log.offset_bottom - 4 * 30
+
+
+func log_msg(text: String, color: Color = UI.WHITE) -> void:
+	if msg_log == null:
+		return
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_override("font", PixelFont.font())
+	l.add_theme_font_size_override("font_size", PixelFont.SIZE * 2)
+	l.add_theme_color_override("font_color", color)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.95))
+	l.add_theme_constant_override("outline_size", 6)
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	msg_log.add_child(l)
+	while msg_log.get_child_count() > 4:
+		var old := msg_log.get_child(0)
+		msg_log.remove_child(old)
+		old.queue_free()
+	var tw := l.create_tween()
+	tw.tween_interval(7.0)
+	tw.tween_property(l, "modulate:a", 0.0, 1.2)
+	tw.tween_callback(l.queue_free)
 
 
 func error_toast(r: Dictionary) -> void:
@@ -579,6 +653,7 @@ func _check_payday() -> void:
 	var gained := int(profile.get("balance", 0)) - before
 	if gained > 0 and node.ready_state == "ready":
 		toast("PAYDAY!  +%d PLS from the network" % gained, UI.GOLD)
+		log_msg("Payday: the network paid you %d PLS." % gained, UI.GOLD)
 		play("payday")
 		vibrate(150)
 		world.coin_shower()

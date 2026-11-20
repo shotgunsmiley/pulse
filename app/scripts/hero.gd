@@ -23,10 +23,14 @@ var pick_tier := "starter"
 var tool := "pickaxe"        # "pickaxe", "sword" or "none"
 var stance := false          # holding the en-garde pose (duels)
 var home_yaw := 0.0          # facing to return to after a duel knockdown
+var shadow: MeshInstance3D = null    # soft round shadow on the ground (stays flat when the body falls)
+static var _shadow_mat: StandardMaterial3D = null
 
 
 func build(appearance: Dictionary, tier: String) -> void:
 	for c in get_children():
+		if c is OmniLight3D and c.get_parent() == self and c != pick_light:
+			continue          # the world's miner lamp lives on the hero; keep it across rebuilds
 		remove_child(c)
 		c.queue_free()
 	parts.clear()
@@ -78,6 +82,52 @@ func build(appearance: Dictionary, tier: String) -> void:
 		parts["pickaxe"].add_child(pick_light)
 	set_tool(tool)
 	_rest_pose()
+	_make_shadow()
+
+
+# A soft dark disc under the feet: grounds the character the way old-school games did.
+func _make_shadow() -> void:
+	if _shadow_mat == null:
+		var g := Gradient.new()
+		g.set_color(0, Color(0, 0, 0, 0.55))
+		g.set_color(1, Color(0, 0, 0, 0.0))
+		g.add_point(0.55, Color(0, 0, 0, 0.42))
+		var tex := GradientTexture2D.new()
+		tex.gradient = g
+		tex.fill = GradientTexture2D.FILL_RADIAL
+		tex.fill_from = Vector2(0.5, 0.5)
+		tex.fill_to = Vector2(1.0, 0.5)
+		tex.width = 64
+		tex.height = 64
+		_shadow_mat = StandardMaterial3D.new()
+		_shadow_mat.albedo_texture = tex
+		_shadow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_shadow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_shadow_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+		_shadow_mat.render_priority = -1
+	shadow = MeshInstance3D.new()
+	var q := QuadMesh.new()
+	q.size = Vector2(1.0, 1.0)
+	q.orientation = PlaneMesh.FACE_Y
+	shadow.mesh = q
+	shadow.material_override = _shadow_mat
+	shadow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	shadow.top_level = true
+	add_child(shadow)
+	_follow_shadow()
+
+
+func _follow_shadow() -> void:
+	if shadow == null or not is_inside_tree():
+		return
+	var gp := global_position
+	# a body lying on the ground (duel knockdown) casts a longer shadow
+	var lying := absf(rotation.x) > 0.6
+	shadow.global_position = Vector3(gp.x, (gp.y if absf(rotation.x) < 0.6 else 0.0) + 0.03, gp.z)
+	if lying:
+		shadow.global_position += Vector3(sin(rotation.y), 0, cos(rotation.y)) * 0.85
+	shadow.scale = Vector3(1.0, 1.0, 1.9) if lying else Vector3.ONE
+	shadow.rotation = Vector3(0, rotation.y, 0)
 
 
 func _pick(appearance: Dictionary, key: String, count: int) -> int:
@@ -138,6 +188,7 @@ func set_walking(on: bool) -> void:
 func _process(delta: float) -> void:
 	if not parts.has("torso"):
 		return
+	_follow_shadow()
 	if pick_light:
 		pick_light.light_energy = 0.7 + 0.25 * sin(Time.get_ticks_msec() * 0.004)
 	if walking:

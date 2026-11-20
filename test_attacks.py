@@ -182,7 +182,7 @@ def a_http():
         t0 = time.time()
         r = urllib.request.urlopen(base + '/health', timeout=10)
         h = json.loads(r.read())
-        assert h['version'] == 5.1
+        assert h['version'] == 5.2
         dt = time.time() - t0
         for c in idle:
             c.close()
