@@ -107,6 +107,9 @@ func _reel(tap_ms: int) -> void:
 		M.play("rare" if rar >= 3 else "coin")
 		M.vibrate(40 + rar * 30)
 		M.apply({"xp": r["xp"]})
+		if int(r.get("rain_xp", 0)) > 0:
+			M.log_msg("The rain has the fish biting: +%d xp." % int(r["rain_xp"]), UI.TEAL_L)
+		M.log_msg("You caught a %s (%s cm)%s." % [str(r["fish"]), UI.n(r["size_cm"]), " - a new record!" if r.get("record", false) else ""], UI.TEAL_L)
 		M.refresh_profile()
 	else:
 		info.text = str(r.get("why", "It got away."))

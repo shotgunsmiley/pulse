@@ -454,7 +454,8 @@ POSES = {   # arm swing angles (degrees, rotation about x) for the strike animat
 APPEARANCE = {
     'skin': ['#e0b08a', '#c8946a', '#a87650', '#8a5c3c', '#5e3e28'],
     'hair_color': ['#4a3423', '#1e1b19', '#a8853f', '#8f3a26', '#c8c4b8', '#3f7a6e'],
-    'shirt': ['#6e4a2c', '#4e5c30', '#365a38', '#2e4470', '#7a2a26', '#3e2c52'],
+    'shirt': ['#6e4a2c', '#4e5c30', '#365a38', '#2e4470', '#7a2a26', '#3e2c52',
+              '#c9a227', '#2a8c8c', '#b0457a', '#e0e0d8', '#1e1e24', '#d06a28'],   # 6-11: dyes found while mining
     'pants': ['#3d3a35', '#4e3b28', '#8a7a58', '#5c6066'],
     'accent': ['#3f7a6e', '#b8902e', '#a8552a', '#6e4e9a', '#e8b04a'],
     'pick': {'starter': '#8d8d8d', 'iron': '#9aa0a4', 'crystal': '#2A9D8F', 'void': '#6a3fa8'},

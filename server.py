@@ -4940,6 +4940,648 @@ def h_repair(u, b):
 POST_AUTH.update({'/repair': h_repair})
 VERSION = 5.2
 
+# ===========================================================================
+# v5.3 EXTRAS - 50 small features that make the game more fun without new menus
+# ===========================================================================
+# Everything lives in u['x'] (one dict per player) so old saves load untouched.
+# No feature here mints PLS: rewards are ore, xp, gems and cosmetics only.
+VERSION = 5.3
+
+DYE_BASE = APPEARANCE_RANGES['shirt']            # base shirt colours; dyes unlock the next 6
+APPEARANCE_RANGES['shirt'] = DYE_BASE + 6
+DYE_NAMES = ['Gold', 'Teal', 'Rose', 'Bone White', 'Coal Black', 'Ember']
+TAUNTS = ['', 'May the faster hand win.', 'I have been practising.', 'Blink and you lose.', 'Again? Fine.', 'Steel never lies.']
+CREW_COLORS = ['#3f7a6e', '#b8902e', '#a8552a', '#6e4e9a', '#2e6fb0', '#b03a3a', '#3a8a3a', '#d0d0c8']
+SECRET_BADGES = {
+    'midnight': ('Midnight Miner', 'Landed a strike in the first minute after midnight (UTC)'),
+    'lucky7': ('Seven Sparks', 'Hit 7 lucky strikes'),
+    'rich_10': ('Prospector', 'Cleared 10 rich veins'),
+    'rival_win': ('Grudge Match', 'Beat your rival in a duel'),
+}
+for _k, (_n, _d) in SECRET_BADGES.items():
+    BADGE_INFO[_k] = {'name': _n, 'desc': _d, 'secret': True}
+MASTERY = [(2000, 'gold'), (500, 'silver'), (100, 'bronze')]
+LUCKY_CHANCE = 0.025
+DYE_CHANCE = 0.004
+GIFT_DAY_SEND = 10
+GIFT_DAY_RECEIVE = 30
+EXTRA_BONUSES = os.environ.get('PULSE_EXTRA_BONUSES', '1') != '0'   # tests of the base rules switch these off
+
+
+def X(u):
+    x = u.setdefault('x', {})
+    for k, v in (('traits', {}), ('clears', {}), ('inbox', []), ('waved', {}), ('h2h', {}), ('visits', []), ('likes', 0),
+                 ('liked', {}), ('week_days', {}), ('chests', []), ('wstreak', 0), ('lucky_n', 0), ('rich_n', 0),
+                 ('rhythm_left', 0), ('title', ''), ('taunt', 0), ('knight_wins', 0), ('last_me', 0), ('comeback_until', 0)):
+        if k not in x:
+            x[k] = v if not isinstance(v, (dict, list)) else type(v)()
+    return x
+
+
+def _seed(*parts):
+    return int(hashlib.sha256(('|'.join(str(p) for p in parts)).encode()).hexdigest()[:12], 16)
+
+
+def push_inbox(u, item):
+    x = X(u)
+    item['t'] = int(now())
+    x['inbox'] = (x['inbox'] + [item])[-20:]
+
+
+# ---------------------------------------------------------------- daily forecast + weather (7, 26)
+def forecast():
+    r = random.Random(_seed('forecast', day_key()))
+    ore = r.choices(['coal', 'iron', 'crystal', 'void'], [3, 3, 2, 1])[0]
+    rain = r.random() < 0.3
+    lines = {'coal': 'Coal runs thick today.', 'iron': 'Iron runs rich today.', 'crystal': 'The crystals are singing today.',
+             'void': 'The rift is restless today.'}
+    return {'ore': ore, 'bonus': 0.2, 'rain': rain,
+            'say': lines[ore] + ' +20%% %s.' % ore + (' Rain in town - the fish are biting.' if rain else '')}
+
+
+def knight_target():
+    return 250 + _seed('knight', day_key()) % 51           # 250-300 ms, same for everyone today
+
+
+def merchant():
+    """A wandering merchant visits on weekends with one dye, priced in ore."""
+    here = datetime.datetime.utcnow().weekday() >= 5
+    k = _seed('merchant', week_key()) % 6
+    price = {'crystal': 40, 'iron': 120}
+    return {'here': here, 'item': 'shirt_%d' % (DYE_BASE + k), 'name': DYE_NAMES[k] + ' Dye', 'price': price}
+
+
+def _round_extra(v):
+    """Turn a fractional bonus into whole ore, keeping the right average."""
+    n = int(v)
+    return n + (1 if random.random() < v - n else 0)
+
+
+def _give_dye(u):
+    owned = set(u['cosmetics'])
+    left = [k for k in range(6) if 'shirt_%d' % (DYE_BASE + k) not in owned]
+    if not left:
+        return None
+    k = random.choice(left)
+    u['cosmetics'].append('shirt_%d' % (DYE_BASE + k))
+    return DYE_NAMES[k]
+
+
+def _crew_rally(u):
+    c = DB['crews'].get(u.get('crew') or '')
+    if not c:
+        return 0
+    n = 0
+    for uid in c['members']:
+        m = DB['users'].get(uid)
+        if m and (m.get('activity') or {}).get('what') == 'mine' and now() - (m.get('activity') or {}).get('t', 0) < 120:
+            n += 1
+    return n
+
+
+def _news_to_friends(u, text):
+    """Friend nudges: at most 5 a day per player so nobody gets spammed."""
+    if day_count(u, 'news_out') >= 5:
+        return
+    day_add(u, 'news_out')
+    for fid in friends_of(u['uid']):
+        f = DB['users'].get(fid)
+        if f:
+            push_inbox(f, {'kind': 'news', 'text': text})
+
+
+# ---------------------------------------------------------------- mining (1, 2, 4, 7, 12, 15, 33, 35, 42, 48, 49)
+_v52_h_mine_strike = h_mine_strike
+def h_mine_strike(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    tier = c['challenge']['tier'] if c and c['uid'] == u['uid'] else 1
+    x = X(u)
+    trait_before = x['traits'].get(str(tier), '')
+    old_lvl = level_for(u['xp'])
+    out = _v52_h_mine_strike(u, b)
+    q = out['quality']
+    t = TIERS[tier - 1]
+    ore = t['ore']
+    taper = float(out.get('taper', 1.0))
+    extra = 0.0
+    xp_extra = 0
+    hit = q != 'miss'
+    if hit and not u.get('flagged') and EXTRA_BONUSES:
+        base = out['ore_gained']
+        if random.random() < LUCKY_CHANCE:                            # 1 lucky strike
+            extra += base
+            out['lucky'] = True
+            x['lucky_n'] += 1
+            if x['lucky_n'] >= 7:
+                give_badge(u, 'lucky7')
+        if x['rhythm_left'] > 0:                                      # 2 rhythm glow
+            extra += 1
+            x['rhythm_left'] -= 1
+        if trait_before == 'stubborn':                                # 4 vein personalities
+            extra += 1
+        elif trait_before == 'rich':
+            extra += base * 0.5
+        fc = forecast()                                               # 7 forecast
+        if fc['ore'] == ore:
+            extra += base * fc['bonus']
+        rally = _crew_rally(u)                                        # 48 crew rally
+        if rally >= 3:
+            extra += base * 0.1
+            out['rally'] = rally
+        if q == 'perfect' and day_count(u, 'first_perfect') == 0:     # 42 first perfect of the day
+            day_add(u, 'first_perfect')
+            xp_extra += 25
+            out['first_perfect'] = 25
+        if now() < x['comeback_until']:                               # 49 comeback bonus: double xp
+            xp_extra += QUALITY_XP[q] + (t['id'] - 1)
+            out['comeback'] = int(x['comeback_until'] - now())
+        if q == 'perfect' and random.random() < DYE_CHANCE:           # 35 dyes
+            name = _give_dye(u)
+            if name:
+                out['dye'] = name
+    if q == 'perfect' and u['streak'] > 0 and u['streak'] % 3 == 0:
+        x['rhythm_left'] = 3
+    out['rhythm'] = x['rhythm_left']
+    add = _round_extra(extra * taper)
+    if add > 0:
+        u['ore'][ore] += add
+        out['bonus_ore'] = int(out.get('bonus_ore', 0)) + add
+    if xp_extra:
+        u['xp'] += xp_extra
+    if hit:
+        tm = time.gmtime(now())
+        if tm.tm_hour == 0 and tm.tm_min == 0:                        # 15 secret badge
+            give_badge(u, 'midnight')
+    key = str(tier)
+    if out['cleared']:
+        x['clears'][key] = x['clears'].get(key, 0) + 1                # 12 mastery
+        if trait_before == 'rich':
+            x['rich_n'] += 1
+            if x['rich_n'] >= 10:
+                give_badge(u, 'rich_10')
+        roll = random.random() if EXTRA_BONUSES else 1.0             # 4 the next vein's personality
+        new_trait = 'stubborn' if roll < 0.15 else ('rich' if roll < 0.25 else '')
+        x['traits'][key] = new_trait
+        if new_trait == 'stubborn':
+            u['vein_hp'][key] = int(t['hp'] * 1.5)
+        if tier >= 3 and day_count(u, 'news_vein%d' % tier) == 0:    # 17 friend nudge
+            day_add(u, 'news_vein%d' % tier)
+            _news_to_friends(u, '%s just cleared a %s!' % (u['username'], t['name']))
+    if 'first_vein' in u['badges'] and not any(u['cabin']):           # 33 first trophy goes on the shelf
+        u['cabin'] = (['badge:first_vein'] + [''] * CABIN_SLOTS)[:CABIN_SLOTS]
+    trait_now = x['traits'].get(key, '')
+    out['trait'] = trait_now
+    out['vein_hp'] = u['vein_hp'].get(key, t['hp'])
+    out['vein_max'] = int(t['hp'] * 1.5) if trait_now == 'stubborn' else t['hp']
+    out['clears'] = x['clears'].get(key, 0)
+    new_lvl = level_for(u['xp'])
+    out.update({'xp': u['xp'], 'level': new_lvl, 'level_up': new_lvl > old_lvl, 'title': title_for(new_lvl), 'ore_inv': u['ore']})
+    if new_lvl > old_lvl and new_lvl % 5 == 0:
+        _news_to_friends(u, '%s reached mining level %d!' % (u['username'], new_lvl))
+    save()
+    return out
+
+
+def mastery_of(n):
+    for need, name in MASTERY:
+        if n >= need:
+            return name
+    return ''
+
+
+_v52_h_veins = h_veins
+def h_veins(u, q):
+    out = _v52_h_veins(u, q)
+    x = X(u)
+    for v in out['veins']:
+        k = str(v['id'])
+        tr = x['traits'].get(k, '')
+        v['trait'] = tr
+        if tr == 'stubborn':
+            v['hp'] = int(v['hp'] * 1.5)
+        v['clears'] = x['clears'].get(k, 0)
+        v['mastery'] = mastery_of(v['clears'])
+    out['forecast'] = forecast()
+    out['cart_ready'] = day_count(u, 'cart') == 0
+    return out
+
+
+# ---------------------------------------------------------------- daily cart (8) + weekly chest (9)
+def h_cart_claim(u, b):
+    if day_count(u, 'cart') > 0:
+        raise ApiError('cart_gone', 'The cart already came today. Back tomorrow!')
+    day_add(u, 'cart')
+    best = max([t['id'] for t in TIERS if tier_status(u, t)[0]] or [1])
+    got = {'coal': random.randint(6, 12)}
+    o = TIERS[best - 1]['ore']
+    got[o] = got.get(o, 0) + random.randint(3, 8)
+    for k, n in got.items():
+        u['ore'][k] += n
+    save()
+    return {'ok': True, 'ore': got, 'ore_inv': u['ore']}
+
+
+def _mark_day(u):
+    x = X(u)
+    wk = week_key()
+    days = set(x['week_days'].get(wk, []))
+    days.add(day_key())
+    x['week_days'] = {wk: sorted(days)}
+    return len(days)
+
+
+def h_chest_claim(u, b):
+    x = X(u)
+    wk = week_key()
+    if len(x['week_days'].get(wk, [])) < 5:
+        raise ApiError('chest_locked', 'Play on 5 different days this week to open the chest.')
+    if wk in x['chests']:
+        raise ApiError('chest_open', 'You already opened this week\'s chest.')
+    x['chests'] = (x['chests'] + [wk])[-8:]
+    got = {}
+    dye = _give_dye(u) if random.random() < 0.35 else None
+    if dye:
+        got['dye'] = dye
+    else:
+        g = random.choices(GEM_NAMES, [6, 3, 2, 1])[0]
+        u['gems'][g] += 1
+        got['gem'] = g
+    u['ore']['coal'] += 20
+    got['coal'] = 20
+    save()
+    return {'ok': True, 'got': got, 'profile': profile_view(u)}
+
+
+# ---------------------------------------------------------------- /me: away summary, inbox, comeback, daily info (10, 16, 17, 49)
+_v52_h_me = h_me
+def h_me(u, q):
+    x = X(u)
+    gap = now() - x['last_me'] if x['last_me'] else 0
+    away = None
+    if gap > 3 * 3600:
+        since = x['last_me']
+        node_pls = sum(r['pls'] for r in DB['node_rewards'] if r['uid'] == u['uid'] and r['t'] > since)
+        won = lost = 0
+        for m in DB['matches'].values():
+            if u['uid'] in m['players'] and m['state'] == 'settled' and m.get('settled_t', 0) > since:
+                w = (m.get('result') or {}).get('winner')
+                if w == u['username']:
+                    won += 1
+                elif w:
+                    lost += 1
+        away = {'hours': int(gap // 3600), 'node_pls': node_pls, 'duels_won': won, 'duels_lost': lost}
+        if gap > 3 * 86400:
+            x['comeback_until'] = now() + 1800
+            away['comeback'] = True
+    x['last_me'] = now()
+    week_n = _mark_day(u)
+    out = _v52_h_me(u, q)
+    out['away'] = away
+    out['inbox'] = x['inbox']
+    x['inbox'] = []
+    out['daily'] = {'forecast': forecast(), 'cart_ready': day_count(u, 'cart') == 0, 'knight_ms': knight_target(),
+                    'knight_done': day_count(u, 'knight') > 0, 'week_days': week_n,
+                    'chest_ready': week_n >= 5 and week_key() not in x['chests'], 'merchant': merchant(),
+                    'comeback': max(0, int(x['comeback_until'] - now()))}
+    save()
+    return out
+
+
+# ---------------------------------------------------------------- profile extras: chosen title, pick names, dyes (14, 34, 35)
+def earned_titles(u):
+    lvl = level_for(u['xp'])
+    t = [name for need, name in LEVEL_TITLES if lvl >= need]
+    t += [BADGE_INFO[k]['name'] for k in u['badges'] if k in BADGE_INFO]
+    return t
+
+
+_v52_profile_view = profile_view
+def profile_view(u, full=True):
+    out = _v52_profile_view(u, full)
+    x = X(u)
+    out['shown_title'] = x['title'] if x['title'] in earned_titles(u) else ''
+    if full:
+        out['titles'] = earned_titles(u)
+        out['taunt'] = x['taunt']
+        out['win_streak'] = x['wstreak']
+        out['knight_wins'] = x['knight_wins']
+        out['vein_clears'] = x['clears']
+        out['likes'] = x['likes']
+        out['dyes'] = [k for k in range(6) if 'shirt_%d' % (DYE_BASE + k) in u['cosmetics']]
+        out['fish_best'] = dict(u.get('fish_best', {}))
+        out['fish_names'] = [f[0] for f in FISH]
+        out['gem_names'] = list(GEM_NAMES)
+        c = DB['crews'].get(u.get('crew') or '')
+        out['crew_color'] = c.get('color', -1) if c else -1
+    return out
+
+
+def h_title(u, b):
+    t = str(b.get('title', ''))
+    if t and t not in earned_titles(u):
+        raise ApiError('not_earned', 'Earn that title first.')
+    X(u)['title'] = t
+    save()
+    return {'ok': True, 'profile': profile_view(u)}
+
+
+def h_taunt(u, b):
+    i = to_int(b.get('taunt'), -1)
+    if i < 0 or i >= len(TAUNTS):
+        raise ApiError('bad_taunt')
+    X(u)['taunt'] = i
+    save()
+    return {'ok': True, 'taunt': i, 'text': TAUNTS[i]}
+
+
+def h_gear_name(u, b):
+    g = u['gear'].get(b.get('slot'))
+    if not g:
+        raise ApiError('no_gear')
+    name = str(b.get('name', '')).strip()
+    if name and not re.match(r"^[A-Za-z0-9 '\-]{1,16}$", name):
+        raise ApiError('bad_name', 'Names are up to 16 letters, numbers, spaces, - or \'.')
+    g['nick'] = name
+    save()
+    return {'ok': True, 'profile': profile_view(u)}
+
+
+# ---------------------------------------------------------------- social: waves, gifts, crew colour (16, 18, 19)
+def _user_named(name):
+    uid = DB['names'].get(str(name or '').strip().lower())
+    if not uid:
+        raise ApiError('no_user', 'No miner by that name.')
+    return user_fix(DB['users'][uid])
+
+
+def h_wave(u, b):
+    v = _user_named(b.get('username'))
+    if v['uid'] == u['uid']:
+        raise ApiError('self', 'You wave at yourself. Nobody sees.')
+    x = X(u)
+    if now() - x['waved'].get(v['uid'], 0) < 600:
+        raise ApiError('waved', 'You waved at them a moment ago.')
+    if day_count(u, 'waves') >= 30:
+        raise ApiError('wave_limit', 'That is a lot of waving for one day.')
+    day_add(u, 'waves')
+    x['waved'][v['uid']] = now()
+    if len(x['waved']) > 200:
+        for k in sorted(x['waved'], key=x['waved'].get)[:-200]:
+            del x['waved'][k]
+    push_inbox(v, {'kind': 'wave', 'from': u['username']})
+    save()
+    return {'ok': True}
+
+
+def h_gift(u, b):
+    v = _user_named(b.get('username'))
+    ore = str(b.get('ore', ''))
+    n = to_int(b.get('qty'), 0)
+    if v['uid'] == u['uid'] or v['uid'] not in friends_of(u['uid']):
+        raise ApiError('friends_only', 'You can only send ore to friends.')
+    if ore not in ORES or n < 1:
+        raise ApiError('bad_gift')
+    require_seasoned(u, 'send gifts')
+    require_seasoned(v, 'receive gifts')
+    block_linked(u, v, 'send gifts to')
+    if day_count(u, 'gift_out') + n > GIFT_DAY_SEND:
+        raise ApiError('gift_limit', 'You can send %d ore a day (%d left today).' % (GIFT_DAY_SEND, GIFT_DAY_SEND - day_count(u, 'gift_out')))
+    if day_count(v, 'gift_in') + n > GIFT_DAY_RECEIVE:
+        raise ApiError('gift_full', '%s has had enough gifts today.' % v['username'])
+    if u['ore'][ore] < n:
+        raise ApiError('not_enough', 'You do not have that much %s.' % ore)
+    u['ore'][ore] -= n
+    v['ore'][ore] += n
+    u.setdefault('daily', {})['gift_out'] = day_count(u, 'gift_out') + n
+    v.setdefault('daily', {})['gift_in'] = day_count(v, 'gift_in') + n
+    push_inbox(v, {'kind': 'gift', 'from': u['username'], 'ore': ore, 'qty': n})
+    save()
+    return {'ok': True, 'ore_inv': u['ore'], 'left_today': GIFT_DAY_SEND - day_count(u, 'gift_out')}
+
+
+def h_crew_color(u, b):
+    c = DB['crews'].get(u.get('crew') or '')
+    if not c or c['owner'] != u['uid']:
+        raise ApiError('not_owner', 'Only the crew founder can pick the colour.')
+    i = to_int(b.get('color'), -1)
+    if i < 0 or i >= len(CREW_COLORS):
+        raise ApiError('bad_color')
+    c['color'] = i
+    save()
+    return {'ok': True, 'color': i}
+
+
+_v52_crew_view = crew_view
+def crew_view(c):
+    out = _v52_crew_view(c)
+    out['color'] = c.get('color', -1)
+    return out
+
+
+# ---------------------------------------------------------------- arena: taunts, win streaks, rivals, cheers, knight (20-25)
+def _look(uid):
+    x = DB['users'].get(uid) or {}
+    a = dict(x.get('appearance') or {})
+    xx = x.get('x') or {}
+    c = DB['crews'].get(x.get('crew') or '')
+    a['crew_color'] = c.get('color', -1) if c else -1
+    a['win_streak'] = xx.get('wstreak', 0)
+    a['taunt'] = TAUNTS[xx.get('taunt', 0) % len(TAUNTS)]
+    t = xx.get('title', '')
+    a['title'] = t if x and t in earned_titles(x) else ''
+    return a
+
+
+_v52_settle_match = settle_match
+def settle_match(m):
+    was = m['state']
+    _v52_settle_match(m)
+    if was != 'active' or m['state'] != 'settled':
+        return
+    m['settled_t'] = now()
+    a, b = (DB['users'][p] for p in m['players'])
+    w = (m.get('result') or {}).get('winner')
+    for me, op in ((a, b), (b, a)):
+        x = X(me)
+        rec = x['h2h'].setdefault(op['uid'], [0, 0])
+        if w == me['username']:
+            rec[0] += 1
+            x['wstreak'] += 1
+            if sum(rec) > 5 and sum(rec) - 1 >= 5:
+                give_badge(me, 'rival_win')
+        elif w:
+            rec[1] += 1
+            x['wstreak'] = 0
+        if len(x['h2h']) > 300:
+            for k in list(x['h2h'])[:-300]:
+                del x['h2h'][k]
+
+
+def rivalry(u, opp_uid):
+    rec = X(u)['h2h'].get(opp_uid, [0, 0])
+    return {'wins': rec[0], 'losses': rec[1], 'rival': sum(rec) >= 5}
+
+
+_v52_pvp_play_route = POST_AUTH['/pvp/play']
+def h_pvp_play_x(u, b):
+    out = _v52_pvp_play_route(u, b)
+    m = DB['matches'].get(b.get('match_id') or '')
+    if m and u['uid'] in m['players']:
+        opp = [p for p in m['players'] if p != u['uid']][0]
+        out['rivalry'] = rivalry(u, opp)
+    return out
+
+
+def h_cheer(u, b):
+    m = DB['matches'].get(b.get('id') or '')
+    if not m:
+        raise ApiError('no_match')
+    if u['uid'] in m['players']:
+        raise ApiError('own_duel', 'You cannot cheer your own duel.')
+    ch = m.setdefault('cheerers', [])
+    if u['uid'] in ch:
+        raise ApiError('cheered', 'You already cheered this duel.')
+    if len(ch) < 500:
+        ch.append(u['uid'])
+    m['cheers'] = m.get('cheers', 0) + 1
+    save()
+    return {'ok': True, 'cheers': m['cheers']}
+
+
+_v52_replay_route = GET_AUTH['/duels/replay']
+def h_duel_replay_x(u, q):
+    out = _v52_replay_route(u, q)
+    m = DB['matches'].get((q.get('id') or [''])[0])
+    if m:
+        out['cheers'] = m.get('cheers', 0)
+        opp = [p for p in m['players'] if p != u['uid']]
+        if u['uid'] in m['players'] and opp:
+            out['rivalry'] = rivalry(u, opp[0])
+    return out
+
+
+_v52_duels_live = GET_AUTH.get('/duels/live', h_duels_live)
+def h_duels_live_x(u, q):
+    out = _v52_duels_live(u, q)
+    for d in out.get('duels', []):
+        m = DB['matches'].get(d.get('id'))
+        d['cheers'] = m.get('cheers', 0) if m else 0
+    return out
+
+
+_v52_practice_route = POST_AUTH['/practice/submit']
+def h_practice_submit_x(u, b):
+    c = CHALLENGES.get(b.get('id') or '')
+    game = c['game'] if c and c['uid'] == u['uid'] else ''
+    out = _v52_practice_route(u, b)
+    if game == 'quickdraw' and out.get('score', 0) > 0:               # 24 daily Training Knight challenge
+        res = b.get('result') or {}
+        rts = [to_int(r, -1) for r in (res.get('reactions') or [])]
+        good = [r for r in rts if r > 0]
+        avg = int(sum(good) / len(good)) if len(good) >= 4 else 9999
+        target = knight_target()
+        k = {'target': target, 'avg': avg, 'beat': avg <= target, 'done': day_count(u, 'knight') > 0}
+        if k['beat'] and not k['done']:
+            day_add(u, 'knight')
+            X(u)['knight_wins'] += 1
+            u['ore']['iron'] += 8
+            reward = {'iron': 8}
+            if tier_status(u, TIERS[2])[0]:
+                u['ore']['crystal'] += 3
+                reward['crystal'] = 3
+            k['reward'] = reward
+            save()
+        out['knight'] = k
+    return out
+
+
+# ---------------------------------------------------------------- merchant (27)
+def h_merchant(u, q):
+    return {'ok': True, 'merchant': merchant()}
+
+
+def h_merchant_buy(u, b):
+    mm = merchant()
+    if not mm['here']:
+        raise ApiError('not_here', 'The merchant comes back at the weekend.')
+    if mm['item'] in u['cosmetics']:
+        raise ApiError('owned', 'You already have that dye.')
+    for k, n in mm['price'].items():
+        if u['ore'][k] < n:
+            raise ApiError('not_enough', 'You need %d %s.' % (n, k))
+    pay_ore(u, mm['price'])
+    u['cosmetics'].append(mm['item'])
+    save()
+    return {'ok': True, 'profile': profile_view(u)}
+
+
+# ---------------------------------------------------------------- cabin visitors and likes (32)
+_v52_cabin_route = GET_AUTH.get('/cabin', h_cabin)
+def h_cabin_x(u, q):
+    out = _v52_cabin_route(u, q)
+    who = (q.get('user') or [''])[0].strip().lower()
+    owner_uid = DB['names'].get(who) if who else u['uid']
+    owner = DB['users'].get(owner_uid) if owner_uid else u
+    if owner is None:
+        return out
+    xo = X(owner)
+    if owner['uid'] != u['uid']:
+        xo['visits'] = ([v for v in xo['visits'] if v['name'] != u['username']] + [{'name': u['username'], 't': int(now())}])[-10:]
+        out['liked'] = xo['liked'].get(u['uid']) == day_key()
+        save()
+    else:
+        out['visitors'] = list(reversed(xo['visits']))
+    out['likes'] = xo['likes']
+    return out
+
+
+def h_cabin_like(u, b):
+    v = _user_named(b.get('username'))
+    if v['uid'] == u['uid']:
+        raise ApiError('self', 'Liking your own cabin does not count.')
+    xv = X(v)
+    if xv['liked'].get(u['uid']) == day_key():
+        raise ApiError('liked', 'You liked this cabin today already.')
+    xv['liked'][u['uid']] = day_key()
+    if len(xv['liked']) > 500:
+        for k in list(xv['liked'])[:-500]:
+            del xv['liked'][k]
+    xv['likes'] += 1
+    push_inbox(v, {'kind': 'like', 'from': u['username']})
+    save()
+    return {'ok': True, 'likes': xv['likes']}
+
+
+# ---------------------------------------------------------------- fishing in the rain (26)
+_v52_fish_reel_route = POST_AUTH['/fish/reel']
+def h_fish_reel_x(u, b):
+    out = _v52_fish_reel_route(u, b)
+    if out.get('caught') and forecast()['rain']:
+        bonus = 2 + int(out.get('rarity', 0)) * 2
+        u['xp'] += bonus
+        out['xp'] = u['xp']
+        out['rain_xp'] = bonus
+        save()
+    return out
+
+
+# ---------------------------------------------------------------- badges: secret ones stay hidden until earned (15)
+_v52_h_badges = GET_AUTH.get('/badges', h_badges)
+def h_badges_x(u, q):
+    out = _v52_h_badges(u, q)
+    out['all'] = [b for b in out['all'] if not b.get('secret') or b['id'] in u['badges']]
+    out['secret_left'] = sum(1 for k in SECRET_BADGES if k not in u['badges'])
+    return out
+
+
+POST_AUTH.update({'/mine/strike': h_mine_strike, '/cart/claim': h_cart_claim, '/chest/claim': h_chest_claim,
+                  '/title': h_title, '/taunt': h_taunt, '/gear/name': h_gear_name, '/wave': h_wave, '/gift': h_gift,
+                  '/crew/color': h_crew_color, '/duels/cheer': h_cheer, '/merchant/buy': h_merchant_buy,
+                  '/cabin/like': h_cabin_like, '/pvp/play': h_pvp_play_x, '/practice/submit': h_practice_submit_x,
+                  '/fish/reel': h_fish_reel_x})
+GET_AUTH.update({'/me': h_me, '/mine/veins': h_veins, '/merchant': h_merchant, '/duels/replay': h_duel_replay_x,
+                 '/duels/live': h_duels_live_x, '/cabin': h_cabin_x, '/badges': h_badges_x})
+
 # ---------------------------------------------------------------------------
 # START
 # ---------------------------------------------------------------------------

@@ -21,6 +21,11 @@ func init(m) -> void:
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 	UI.add_title(self, "THE TAVERN", "")
 	tabs = UI.add_tabs(self, ["lobby", "crew", "friends"], ["LOBBY", "CREW", "FRIENDS"], _set_tab)
+	var jb := UI.add_button(self, "JUKEBOX - play the next tune", "stone", 44, 16)
+	jb.pressed.connect(func():
+		var song: String = M.audio.jukebox()
+		M.toast("Now playing: %s" % song, UI.TEAL_L)
+		M.log_msg("The jukebox clunks: \"%s\"." % song, UI.TEAL_L))
 	body = VBoxContainer.new()
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(body)
@@ -186,6 +191,22 @@ func _crew_members(crew: Dictionary, top: Array) -> void:
 	UI.add_label(c, "[%s] %s" % [crew["tag"], crew["name"]], 24, UI.GOLD)
 	for m in crew["members"]:
 		UI.add_label(c, "%s%s  Lv%s  -  %s veins%s" % ["(lead) " if m["owner"] else "", m["username"], UI.n(m["level"]), UI.n(m["week_blocks"]), "  ONLINE" if m["online"] else ""], 18, UI.GREEN if m["online"] else UI.WHITE)
+	var me_owner := false
+	for m in crew["members"]:
+		if m["owner"] and m["username"] == M.profile.get("username", ""):
+			me_owner = true
+	if me_owner:
+		UI.add_label(c, "CREW COLOUR - shows on every member's trim", 18, UI.AMBER)
+		var cr := UI.add_row(c, 4)
+		var cols := ["#3f7a6e", "#b8902e", "#a8552a", "#6e4e9a", "#2e6fb0", "#b03a3a", "#3a8a3a", "#d0d0c8"]
+		for i in range(cols.size()):
+			var sw := Button.new()
+			sw.custom_minimum_size = Vector2(56, 48)
+			sw.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			sw.add_theme_stylebox_override("normal", UI.box(Color(cols[i]), UI.AMBER if int(crew.get("color", -1)) == i else UI.OUTLINE, 3))
+			var ci := i
+			sw.pressed.connect(func(): _crew_act("/crew/color", {"color": ci}))
+			cr.add_child(sw)
 	var back := UI.add_button(c, "BACK TO CREW CHAT", "teal", 54, 20)
 	back.pressed.connect(func(): _set_tab("crew"))
 	var leave := UI.add_button(c, "LEAVE CREW", "red", 54, 20)
@@ -262,6 +283,9 @@ func _friends_view() -> void:
 				M.screens["cabin"].visit(fname)
 				M.screens["cabin"].on_open()
 		)
+		var fr2 := UI.add_row(fc)
+		UI.add_button(fr2, "WAVE", "stone", 46, 18).pressed.connect(func(): _friend_act("/wave", {"username": fname}, "You waved at %s." % fname))
+		UI.add_button(fr2, "GIFT ORE", "stone", 46, 18).pressed.connect(func(): _gift_card(fc, fname))
 	if r["friends"].is_empty() and r["pending"].is_empty():
 		UI.add_label(list, "No friends yet. Add someone by their username.", 18, UI.MUTED)
 
@@ -273,3 +297,29 @@ func _friend_act(path: String, data: Dictionary, ok_text: String) -> void:
 	else:
 		M.error_toast(r)
 	_set_tab("friends")
+
+
+# Send a friend a little ore (friends only, up to 10 a day).
+func _gift_card(parent: Node, fname: String) -> void:
+	var gc := UI.add_card(parent, "deep")
+	UI.add_label(gc, "Gift ore to %s (up to 10 a day)" % fname, 18, UI.AMBER)
+	var ores := ["coal", "iron", "crystal", "void"]
+	var pick := {"ore": 0, "qty": 5}
+	var row := UI.add_row(gc, 6)
+	var ob := UI.add_button(row, "COAL", "stone", 46, 18)
+	var qb := UI.add_button(row, "x5", "stone", 46, 18)
+	ob.pressed.connect(func():
+		pick["ore"] = (int(pick["ore"]) + 1) % ores.size()
+		ob.text = str(ores[pick["ore"]]).to_upper())
+	qb.pressed.connect(func():
+		pick["qty"] = {1: 5, 5: 10, 10: 1}[int(pick["qty"])]
+		qb.text = "x%d" % int(pick["qty"]))
+	var send := UI.add_button(row, "SEND", "amber", 46, 18)
+	send.pressed.connect(func():
+		var r: Dictionary = await M.api.post("/gift", {"username": fname, "ore": ores[pick["ore"]], "qty": pick["qty"]})
+		if r.get("ok", false):
+			M.apply({"ore_inv": r["ore_inv"]})
+			M.toast("Sent %d %s to %s." % [int(pick["qty"]), ores[pick["ore"]], fname], UI.TEAL_L)
+			gc.queue_free()
+		else:
+			M.error_toast(r))

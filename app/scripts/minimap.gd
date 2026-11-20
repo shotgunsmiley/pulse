@@ -82,6 +82,9 @@ func _draw() -> void:
 		else:
 			draw_circle(q, 6.0, ORE.get(int(p["id"]), Color.WHITE))
 			draw_arc(q, 6.0, 0, TAU, 12, Color("#1a1612"), 2.0)
+			if int(p["id"]) == int(w.hidden_tier):
+				# the glittering vein: a pulsing gold ring
+				draw_arc(q, 9.0 + 3.0 * sin(t * 6.0), 0, TAU, 16, Color("#ffd36b"), 2.5)
 	# townsfolk and pet
 	for npc in w.npcs:
 		if is_instance_valid(npc["n"]):

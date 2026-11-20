@@ -58,6 +58,28 @@ func _load() -> void:
 			b.custom_minimum_size = Vector2(140, 46)
 			b.size_flags_horizontal = Control.SIZE_SHRINK_END
 			b.pressed.connect(func(): _choose(slot, r["available"]))
+	UI.add_label(body, "Likes: %s" % UI.n(r.get("likes", 0)), 18, UI.GOLD)
+	if mine:
+		var vis: Array = r.get("visitors", [])
+		if not vis.is_empty():
+			var names := []
+			for v in vis.slice(0, 6):
+				names.append(str(v["name"]))
+			UI.add_label(body, "Recent visitors: " + ", ".join(PackedStringArray(names)), 17, UI.TEAL_L)
+		else:
+			UI.add_label(body, "No visitors yet. Share your name so friends can drop by.", 16, UI.MUTED)
+	else:
+		var like := UI.add_button(body, "LIKED TODAY" if r.get("liked", false) else "LIKE THIS CABIN", "teal", 50, 18)
+		like.disabled = r.get("liked", false)
+		var owner := str(r["owner"])
+		like.pressed.connect(func():
+			var rr: Dictionary = await M.api.post("/cabin/like", {"username": owner})
+			if rr.get("ok", false):
+				M.toast("You liked %s's cabin." % owner, UI.TEAL_L)
+				M.play("coin")
+				_load()
+			else:
+				M.error_toast(rr))
 	if mine:
 		var vc := UI.add_card(body, "dark")
 		UI.add_label(vc, "VISIT A FRIEND", 19, UI.AMBER)

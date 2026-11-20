@@ -72,6 +72,16 @@ func _switch(pair: Array, is_music: bool, name: String, target_db: float) -> voi
 		cur_amb = 1 - idx
 
 
+# The tavern jukebox: play the next tune (until you leave the area).
+const SONGS := [["music_town", "Market Morning"], ["music_mine", "Down the Deep Veins"], ["music_arena", "Steel and Sand"]]
+var juke := -1
+
+func jukebox() -> String:
+	juke = (juke + 1) % SONGS.size()
+	_switch(music, true, SONGS[juke][0], MUSIC_DB if M.settings.get("music", true) else -80.0)
+	return SONGS[juke][1]
+
+
 func refresh() -> void:
 	var area: String = "town"
 	if M.world != null:

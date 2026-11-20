@@ -58,6 +58,28 @@ func _item_name(kind: String, item: String) -> String:
 
 
 func _render_buy(listings: Array) -> void:
+	# the wandering merchant (weekends): one rare dye, paid in ore
+	var mm: Dictionary = M.daily.get("merchant", {})
+	if mm.get("here", false):
+		var mc := UI.add_card(body, "gold")
+		UI.add_label(mc, "WANDERING MERCHANT - here for the weekend", 20, UI.GOLD)
+		var price: Dictionary = mm.get("price", {})
+		var parts := []
+		for k in price.keys():
+			parts.append("%s %s" % [UI.n(price[k]), str(k)])
+		UI.add_label(mc, "%s  -  %s" % [str(mm.get("name", "Dye")), ", ".join(PackedStringArray(parts))], 19, UI.WHITE)
+		var owned: bool = M.profile.get("cosmetics", []).has(str(mm.get("item", "")))
+		var mb := UI.add_button(mc, "ALREADY YOURS" if owned else "TRADE ORE FOR IT", "amber", 50, 20)
+		mb.disabled = owned
+		mb.pressed.connect(func():
+			var rr: Dictionary = await M.api.post("/merchant/buy", {})
+			if rr.get("ok", false):
+				M.apply(rr)
+				M.toast("The merchant hands you the %s. Try it in ME > LOOK." % str(mm.get("name", "dye")), UI.GOLD)
+				M.play("rare")
+			else:
+				M.error_toast(rr)
+			_refresh())
 	var others := listings.filter(func(x): return not x["mine"])
 	if others.is_empty():
 		UI.add_label(body, "Nothing for sale right now. Check back soon, or sell something yourself.", 19, UI.MUTED)

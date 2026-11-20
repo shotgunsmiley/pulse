@@ -81,6 +81,7 @@ func _quickdraw() -> void:
 		dv = DuelView.new()
 		area.add_child(dv)
 		dv.setup(M, duel_info.get("me_look", {}), str(duel_info.get("me_tier", "iron")), str(duel_info.get("op_name", "Opponent")), duel_info.get("op_look", {}))
+		dv.set_rivalry(duel_info.get("rivalry", {}))
 	var pad := UI.add_button(area, "GET READY", "stone", 220 if dv else 460, 44)
 	pad.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	pad.button_down.connect(func():
@@ -147,6 +148,7 @@ func _quickdraw() -> void:
 		await get_tree().create_timer(1.9 if dv else 0.9).timeout
 	if dv and not op_rts.is_empty() and not aborted:
 		info.text = "The duel is decided..."
+		dv.close_finish = DuelView.tally_margin(reactions, op_rts) <= 1
 		await dv.finale(DuelView.tally_winner(reactions, op_rts))
 		await get_tree().create_timer(1.2).timeout
 	_done({"reactions": reactions})

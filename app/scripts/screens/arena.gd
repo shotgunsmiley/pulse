@@ -108,6 +108,9 @@ func _render_practice() -> void:
 		UI.add_label(card, UI.game_name(g).to_upper(), 26, UI.TEAL_L)
 		UI.add_label(card, ABOUT[g], 18, UI.MUTED)
 		UI.add_label(card, "Personal best: %s" % UI.n(best.get(g)), 20, UI.GOLD)
+		if g == "quickdraw" and M.daily.has("knight_ms"):
+			var done: bool = M.daily.get("knight_done", false)
+			UI.add_label(card, ("Today's Training Knight: %d ms average - " % int(M.daily["knight_ms"])) + ("beaten today!" if done else "beat it for an ore purse"), 18, UI.TEAL_L if done else UI.AMBER)
 		var b := UI.add_button(card, "PRACTICE", "teal", 58, 22)
 		b.pressed.connect(func(): _play("practice", g, ""))
 	UI.add_label(body, "No signal? Practice still works offline; your score just is not saved.", 16, UI.MUTED)
@@ -350,6 +353,19 @@ func _play(mode: String, game: String, match_id: String) -> void:
 		var best: Dictionary = M.profile.get("best", {})
 		best[game] = s["best"]
 		M.profile["best"] = best
+		var kn = s.get("knight")
+		if kn != null and typeof(kn) == TYPE_DICTIONARY:
+			if kn.has("reward"):
+				var rw: Dictionary = kn["reward"]
+				var parts := []
+				for k in rw.keys():
+					parts.append("%d %s" % [int(rw[k]), str(k)])
+				M.toast("You beat the Training Knight! Purse: %s" % ", ".join(PackedStringArray(parts)), UI.GOLD)
+				M.log_msg("Training Knight beaten (%d ms vs %d ms): %s." % [int(kn["avg"]), int(kn["target"]), ", ".join(PackedStringArray(parts))], UI.GOLD)
+				M.daily["knight_done"] = true
+				M.refresh_profile()
+			elif not kn.get("done", false) and int(kn.get("avg", 9999)) < 9999:
+				M.log_msg("The Training Knight was faster today: %d ms vs your %d ms." % [int(kn["target"]), int(kn["avg"])], UI.AMBER)
 		for bc in s.get("bounties_claimed", []):
 			M.toast("BOUNTY CLAIMED! +%s PLS from %s" % [UI.n(bc["amount"]), str(bc["by"])], UI.GOLD)
 			M.play("win")
@@ -379,13 +395,16 @@ func _play(mode: String, game: String, match_id: String) -> void:
 
 # Who you cross swords with in Quickdraw, and (when known) how fast they are each round.
 func _duel_info(mode: String, r: Dictionary) -> Dictionary:
-	var me_look: Dictionary = M.profile.get("appearance", {})
+	var me_look: Dictionary = M.profile.get("appearance", {}).duplicate()
+	me_look["win_streak"] = int(M.profile.get("win_streak", 0))
+	me_look["crew_color"] = int(M.profile.get("crew_color", -1))
 	var tier: String = str(M.world.hero.pick_tier) if M.world and M.world.hero else "iron"
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	var knight_rts := []
+	var kt := int(M.daily.get("knight_ms", 300))
 	for i in range(5):
-		knight_rts.append(rng.randi_range(255, 360))
+		knight_rts.append(clampi(kt + rng.randi_range(-30, 30), 180, 480))
 	match mode:
 		"ghost":
 			var g: Dictionary = r.get("ghost", {})
@@ -394,7 +413,8 @@ func _duel_info(mode: String, r: Dictionary) -> Dictionary:
 				"op_rts": res.get("reactions", knight_rts) if typeof(res) == TYPE_DICTIONARY else knight_rts}
 		"pvp":
 			var o: Dictionary = r.get("opponent", {})
-			return {"me_look": me_look, "me_tier": tier, "op_name": str(o.get("username", "Opponent")), "op_look": o.get("look", KNIGHT_LOOK), "op_rts": []}
+			return {"me_look": me_look, "me_tier": tier, "op_name": str(o.get("username", "Opponent")), "op_look": o.get("look", KNIGHT_LOOK), "op_rts": [],
+				"rivalry": r.get("rivalry", {})}
 		"koth":
 			var t: Dictionary = r.get("throne", {})
 			if t.get("king") == null:
@@ -436,6 +456,9 @@ func _sword_fight(rep: Dictionary) -> void:
 	box.add_child(dv)
 	var mlook: Dictionary = mine.get("look", {})
 	dv.setup(M, mlook, "iron", str(theirs.get("username", "Opponent")), theirs.get("look", KNIGHT_LOOK))
+	dv.set_rivalry(rep.get("rivalry", {}))
+	if int(rep.get("cheers", 0)) > 0:
+		dv.cheers = int(rep["cheers"])
 	dv.custom_minimum_size = Vector2(0, 560)
 	if spectator:
 		dv.me_name = str(mine.get("username", "A"))
@@ -575,8 +598,18 @@ func _render_more() -> void:
 				UI.add_label(c5, "%s vs %s  -  %s  -  %s PLS" % [d["a"], d["b"], UI.game_name(d["game"]), UI.n(d["stake"])], 19)
 				UI.add_label(c5, state + ("   %s reactions" % UI.n(d["reactions"]) if int(d["reactions"]) > 0 else ""), 16, UI.TEAL_L if d["state"] == "active" else UI.MUTED)
 				var mid: String = d["id"]
-				var vb := UI.add_button(c5, "WATCH", "teal", 46, 18)
+				var vrow := UI.add_row(c5, 6)
+				var vb := UI.add_button(vrow, "WATCH", "teal", 46, 18)
 				vb.pressed.connect(func(): _show_replay(mid))
+				var chb := UI.add_button(vrow, "CHEER (%d)" % int(d.get("cheers", 0)), "amber", 46, 18)
+				chb.pressed.connect(func():
+					var rr: Dictionary = await M.api.post("/duels/cheer", {"id": mid})
+					if rr.get("ok", false):
+						chb.text = "CHEERED (%d)" % int(rr["cheers"])
+						chb.disabled = true
+						M.play("coin", 1.3)
+					else:
+						M.error_toast(rr))
 
 
 func _show_replay(mid: String) -> void:
@@ -613,6 +646,11 @@ func _show_replay(mid: String) -> void:
 	var res = r.get("result")
 	if res != null and res.get("winner") != null:
 		UI.add_label(body, "WINNER: %s" % str(res["winner"]), 24, UI.GOLD)
+	if int(r.get("cheers", 0)) > 0:
+		UI.add_label(body, "%d spectators cheered this duel." % int(r["cheers"]), 18, UI.AMBER)
+	var rv: Dictionary = r.get("rivalry", {})
+	if rv.get("rival", false):
+		UI.add_label(body, "RIVALS - your record: %d won, %d lost" % [int(rv["wins"]), int(rv["losses"])], 18, Color("#ff8a6a"))
 	if str(r.get("game", "")) == "quickdraw" and str(r.get("state", "")) != "active":
 		var fb := UI.add_button(body, "WATCH THE SWORD FIGHT", "amber", 60, 22)
 		fb.pressed.connect(func(): _sword_fight(r))

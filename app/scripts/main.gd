@@ -64,6 +64,21 @@ var pending_challenge := ""
 var pet_key := "-"
 var tutorial = null
 var msg_log: VBoxContainer = null     # the game log: last few lines of what just happened
+var daily := {}                       # today's forecast, cart, chest, knight target, merchant (from /me)
+var forge_badge: Label = null         # the red "!" on FORGE when gear needs repair
+var photo := false
+const TIPS := [
+	"Tip: a strike in the gold is perfect - three in a row make your pick glow.",
+	"Tip: the mine cart comes once a day. Check the mine.",
+	"Tip: play 5 days in a week to open the weekly chest.",
+	"Tip: press and hold anything in the world to examine it.",
+	"Tip: beat the Training Knight in a Quickdraw practice for a daily ore purse.",
+	"Tip: repairs take ore, and better ore counts.",
+	"Tip: rain in town means the fish bite - extra xp at the lake.",
+	"Tip: name your pickaxe at the Forge. It deserves it.",
+	"Tip: a crew that mines together gets +10% ore.",
+	"Tip: the merchant visits at the weekend with a rare dye.",
+]
 var minimap = null
 var last_payday_epoch := -1
 var audio    # audio.gd: ambience and music
@@ -85,6 +100,7 @@ func _ready() -> void:
 	world.place_tapped.connect(go)
 	world.vein_tapped.connect(_on_vein_tapped)
 	world.examined.connect(func(t: String): log_msg(t, UI.TEAL_L))
+	world.photo_tapped.connect(end_photo_mode)
 	node.pulsed.connect(func(_c): world.network_pulse())
 	audio = preload("res://scripts/audio.gd").new()
 	add_child(audio)
@@ -124,6 +140,7 @@ func _start() -> void:
 	var box := UI.add_card(cover, "deep")
 	UI.add_title(box, "PULSE NETWORK", "Mine. Forge. Compete.")
 	var status := UI.add_label(box, "Connecting to Pulse...", 22, UI.MUTED, true)
+	UI.add_label(box, TIPS[randi() % TIPS.size()], 18, UI.TEAL_L, true).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	if not settings.get("intro_seen", false):
 		_close_overlay()
 		await world.play_intro()
@@ -223,6 +240,10 @@ func enter_game(prof: Dictionary, me: Dictionary = {}) -> void:
 		world.set_season(str(ev["season"]))
 	for b in me.get("new_badges", []):
 		badge_toast(str(b))
+	if me.has("daily"):
+		_handle_me(me)
+	else:
+		_fetch_me_extras()
 	if not prof.get("tutorial", true) and tutorial == null:
 		tutorial = TutorialScript.new()
 		tutorial.setup(self)
@@ -331,7 +352,8 @@ func update_hud() -> void:
 	var ore: Dictionary = profile.get("ore", {})
 	for k in ["coal", "iron", "crystal", "void"]:
 		hud["ore_" + k].text = UI.n(ore.get(k, 0))
-	hud["level"].text = "Lv %s %s" % [UI.n(profile.get("level", 1)), str(profile.get("title", ""))]
+	var shown := str(profile.get("shown_title", ""))
+	hud["level"].text = "Lv %s %s" % [UI.n(profile.get("level", 1)), shown if shown != "" else str(profile.get("title", ""))]
 	var xs := float(profile.get("xp_level_start", 0))
 	var xn := float(profile.get("xp_next", 25))
 	hud["xp"].value = clampf((float(profile.get("xp", 0)) - xs) / maxf(1.0, xn - xs), 0.0, 1.0)
@@ -339,10 +361,32 @@ func update_hud() -> void:
 	var pick := "starter"
 	if gear.has("pickaxe") and not gear["pickaxe"].get("broken", false):
 		pick = str(gear["pickaxe"]["tier"])
-	var key := str(profile.get("appearance", {})) + pick
+	var look: Dictionary = profile.get("appearance", {}).duplicate()
+	look["crew_color"] = int(profile.get("crew_color", -1))
+	var key := str(look) + pick
 	if key != hero_key:
 		hero_key = key
-		world.build_hero(profile.get("appearance", {}), pick)
+		world.build_hero(look, pick)
+	world.pick_nick = str(gear.get("pickaxe", {}).get("nick", "")) if gear.has("pickaxe") else ""
+	# repair reminder on the FORGE button
+	var worn := false
+	for slot in gear.keys():
+		var g: Dictionary = gear[slot]
+		if float(g.get("dur", 1)) < 0.2 * float(g.get("max_dur", 1)):
+			worn = true
+	if forge_badge == null and nav_buttons.has("forge"):
+		forge_badge = Label.new()
+		forge_badge.text = "!"
+		forge_badge.add_theme_font_size_override("font_size", 30)
+		forge_badge.add_theme_color_override("font_color", UI.RED)
+		forge_badge.add_theme_color_override("font_outline_color", Color.BLACK)
+		forge_badge.add_theme_constant_override("outline_size", 6)
+		forge_badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		forge_badge.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+		forge_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		nav_buttons["forge"].add_child(forge_badge)
+	if forge_badge:
+		forge_badge.visible = worn
 	var pk := str(profile.get("pet", ""))
 	if pk != pet_key:
 		pet_key = pk
@@ -382,6 +426,7 @@ func go(place: String) -> void:
 	if place == "town":
 		close_panel()
 		audio.set_area("town")
+		_fetch_leaders()
 		if world.area != "town":
 			world.show_area("town")
 		else:
@@ -562,6 +607,112 @@ func log_msg(text: String, color: Color = UI.WHITE) -> void:
 	tw.tween_callback(l.queue_free)
 
 
+func _fetch_leaders() -> void:
+	var r: Dictionary = await api.get_json("/leaderboard")
+	if r.get("ok", false):
+		var names := []
+		for row in r.get("top", []):
+			if typeof(row) == TYPE_DICTIONARY:
+				names.append(str(row.get("username", row.get("name", "?"))))
+		world.set_leaders(names)
+
+
+# ---------------------------------------------------------------- daily info, inbox, "while you were away"
+func _fetch_me_extras() -> void:
+	var r: Dictionary = await api.get_json("/me")
+	if r.get("ok", false):
+		profile = r["profile"]
+		update_hud()
+		_handle_me(r)
+
+
+func _handle_me(r: Dictionary) -> void:
+	if r.has("daily"):
+		daily = r["daily"]
+		world.set_rain(bool(daily.get("forecast", {}).get("rain", false)))
+		world.set_merchant(bool(daily.get("merchant", {}).get("here", false)))
+	var away = r.get("away")
+	if away != null and typeof(away) == TYPE_DICTIONARY:
+		var parts := ["Welcome back! You were away %d hours." % int(away["hours"])]
+		if int(away.get("node_pls", 0)) > 0:
+			parts.append("Your phone node earned %d PLS." % int(away["node_pls"]))
+		if int(away.get("duels_won", 0)) + int(away.get("duels_lost", 0)) > 0:
+			parts.append("Duels settled: %d won, %d lost." % [int(away["duels_won"]), int(away["duels_lost"])])
+		if away.get("comeback", false):
+			parts.append("Comeback bonus: double xp for 30 minutes!")
+		for line in parts:
+			log_msg(line, UI.GOLD)
+		toast(parts[0] + ("  Double xp for 30 min!" if away.get("comeback", false) else ""), UI.GOLD)
+	for it in r.get("inbox", []):
+		match str(it.get("kind", "")):
+			"wave":
+				log_msg("%s waves at you." % str(it.get("from", "")), UI.TEAL_L)
+			"gift":
+				log_msg("%s sent you %d %s." % [str(it.get("from", "")), int(it.get("qty", 0)), str(it.get("ore", ""))], UI.GOLD)
+			"like":
+				log_msg("%s liked your cabin." % str(it.get("from", "")), UI.TEAL_L)
+			"news":
+				log_msg(str(it.get("text", "")), UI.TEAL_L)
+	if bool(daily.get("chest_ready", false)):
+		garrick_once("chest", "You've been down here five days this week. There's a chest in the mine with your name on it.")
+
+
+# Different buzz patterns so you can feel what happened without looking.
+func vibrate_pattern(kind: String) -> void:
+	if not settings.get("vibrate", true):
+		return
+	var pat: Array = {"perfect": [35], "great": [22], "good": [14], "gem": [40, 70, 40], "level": [60, 60, 60, 60, 120]}.get(kind, [20])
+	for i in range(pat.size()):
+		if i % 2 == 0:
+			Input.vibrate_handheld(int(pat[i]))
+		if i < pat.size() - 1:
+			await get_tree().create_timer(float(pat[i]) / 1000.0 + 0.03).timeout
+
+
+# Garrick says something the first time a thing happens - once only, ever.
+func garrick_once(key: String, text: String) -> void:
+	var seen: Array = settings.get("quips", [])
+	if key in seen:
+		return
+	seen.append(key)
+	settings["quips"] = seen
+	save_settings()
+	log_msg("Garrick: " + text, Color("#ffd36b"))
+
+
+# Photo mode: hide every menu until you tap the screen.
+func photo_mode() -> void:
+	close_panel()
+	_mark_nav(world.area)
+	photo = true
+	layout.visible = false
+	if tutorial != null and is_instance_valid(tutorial):
+		tutorial.visible = false
+	world.photo_mode = true
+	var hint := Label.new()
+	hint.text = "PHOTO MODE - drag to turn, tap to return"
+	hint.add_theme_font_size_override("font_size", 20)
+	hint.add_theme_color_override("font_outline_color", Color.BLACK)
+	hint.add_theme_constant_override("outline_size", 6)
+	hint.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	hint.offset_top = 40 + safe_top
+	ui_root.add_child(hint)
+	var tw := hint.create_tween()
+	tw.tween_interval(2.5)
+	tw.tween_property(hint, "modulate:a", 0.0, 0.6)
+	tw.tween_callback(hint.queue_free)
+
+
+func end_photo_mode() -> void:
+	if not photo:
+		return
+	photo = false
+	layout.visible = true
+	world.photo_mode = false
+	if tutorial != null and is_instance_valid(tutorial):
+		tutorial.visible = true
+
+
 func error_toast(r: Dictionary) -> void:
 	toast(str(r.get("message", r.get("error", "Something went wrong."))), UI.RED)
 	play("buzz")
@@ -650,6 +801,7 @@ func _check_payday() -> void:
 		return
 	profile = r["profile"]
 	update_hud()
+	_handle_me(r)
 	var gained := int(profile.get("balance", 0)) - before
 	if gained > 0 and node.ready_state == "ready":
 		toast("PAYDAY!  +%d PLS from the network" % gained, UI.GOLD)

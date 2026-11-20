@@ -4,10 +4,13 @@ extends VBoxContainer
 
 const UI = preload("res://scripts/ui.gd")
 const MD = preload("res://scripts/model_data.gd")
-const SLOTS := [["skin", "SKIN", 5], ["face", "FACE", 6], ["hair_style", "HAIR", 4], ["hair_color", "HAIR COLOUR", 6], ["shirt", "TUNIC", 6],
+const SLOTS := [["skin", "SKIN", 5], ["face", "FACE", 6], ["hair_style", "HAIR", 4], ["hair_color", "HAIR COLOUR", 6], ["shirt", "TUNIC", 12],
 	["pants", "TROUSERS", 4], ["accent", "TRIM", 5]]
 const FREE := {"skin": [0, 1, 2, 3, 4], "face": [0, 1, 2, 3], "hair_style": [0, 1], "hair_color": [0, 1, 2], "shirt": [0, 1], "pants": [0, 1], "accent": [0]}
 const FACE_NAMES := ["Plain", "Freckles", "Moustache", "Short Beard", "Scarred Veteran", "Grand Beard"]
+const DYE_NAMES := ["Gold", "Teal", "Rose", "Bone White", "Coal Black", "Ember"]
+const TAUNTS := ["(none)", "May the faster hand win.", "I have been practising.", "Blink and you lose.", "Again? Fine.", "Steel never lies."]
+const GEM_COL := {"amber": Color("#e8a040"), "garnet": Color("#c0304a"), "sapphire": Color("#3a6ad0"), "voidstone": Color("#a77cf0")}
 
 var M
 var tabs := {}
@@ -21,7 +24,7 @@ func init(m) -> void:
 	M = m
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
 	UI.add_title(self, "YOUR PROFILE", "")
-	tabs = UI.add_tabs(self, ["look", "shop", "badges", "stats", "settings"], ["LOOK", "SHOP", "BADGES", "STATS", "MORE"], _set_tab)
+	tabs = UI.add_tabs(self, ["look", "shop", "badges", "stats", "settings"], ["LOOK", "SHOP", "JOURNAL", "STATS", "MORE"], _set_tab)
 	body = UI.add_scroll(self)
 
 
@@ -48,6 +51,7 @@ func _set_tab(t: String) -> void:
 		"stats":
 			_stats()
 		"badges":
+			_journal()
 			await _badges()
 		"settings":
 			_settings()
@@ -58,7 +62,40 @@ func _owned(slot: String, v: int) -> bool:
 
 
 func _look() -> void:
-	UI.add_label(body, "Changes preview on your adventurer right away. Locked styles are in the SHOP.", 18, UI.MUTED)
+	# your shown title and your duel taunt
+	var tc := UI.add_card(body, "deep")
+	var titles: Array = M.profile.get("titles", [])
+	var cur := str(M.profile.get("shown_title", ""))
+	var trow := UI.add_row(tc)
+	UI.add_label(trow, "TITLE", 20, UI.AMBER)
+	var tl := UI.add_label(trow, cur if cur != "" else "(level title)", 20, UI.GOLD, true)
+	var tb := UI.add_button(trow, ">", "stone", 52, 24)
+	tb.custom_minimum_size = Vector2(70, 52)
+	tb.pressed.connect(func():
+		var opts := [""] + titles
+		var i := opts.find(cur)
+		var nxt: String = opts[(i + 1) % opts.size()]
+		var r: Dictionary = await M.api.post("/title", {"title": nxt})
+		if r.get("ok", false):
+			M.profile = r["profile"]
+			M.update_hud()
+			_set_tab("look")
+		else:
+			M.error_toast(r))
+	var arow := UI.add_row(tc)
+	UI.add_label(arow, "DUEL TAUNT", 20, UI.AMBER)
+	var ti := int(M.profile.get("taunt", 0))
+	UI.add_label(arow, TAUNTS[clampi(ti, 0, TAUNTS.size() - 1)], 17, UI.WHITE, true)
+	var ab := UI.add_button(arow, ">", "stone", 52, 24)
+	ab.custom_minimum_size = Vector2(70, 52)
+	ab.pressed.connect(func():
+		var r: Dictionary = await M.api.post("/taunt", {"taunt": (ti + 1) % TAUNTS.size()})
+		if r.get("ok", false):
+			M.profile["taunt"] = r["taunt"]
+			_set_tab("look")
+		else:
+			M.error_toast(r))
+	UI.add_label(body, "Changes preview on your adventurer right away. Locked styles are in the SHOP; dyes are found while mining.", 18, UI.MUTED)
 	for s in SLOTS:
 		var slot: String = s[0]
 		var count: int = s[2]
@@ -74,6 +111,10 @@ func _look() -> void:
 			shown = FACE_NAMES[clampi(v, 0, FACE_NAMES.size() - 1)]
 		elif slot == "accent" and v == 4:
 			shown = "Lantern Trim"
+		elif slot == "shirt" and v >= 6:
+			shown = DYE_NAMES[v - 6] + " Dye"
+			if lock != "":
+				lock = "  (find it)"
 		var lab := UI.add_label(row, shown + lock, 20, UI.WHITE if lock == "" else UI.RED, true)
 		var nxt := UI.add_button(row, ">", "stone", 52, 24)
 		nxt.custom_minimum_size = Vector2(70, 52)
@@ -157,6 +198,30 @@ func _stats() -> void:
 	UI.add_label(vc, "Best streak: %s perfect strikes   -   Deepest expedition: floor %s" % [UI.n(M.profile.get("best_streak", 0)), UI.n(M.profile.get("deepest", 0))], 18, UI.TEAL_L)
 	UI.add_label(vc, "Gems: %s amber, %s garnet, %s sapphire, %s voidstone   -   Fish caught: %s" % [UI.n(gems.get("amber", 0)), UI.n(gems.get("garnet", 0)),
 		UI.n(gems.get("sapphire", 0)), UI.n(gems.get("voidstone", 0)), UI.n(M.profile.get("fish_total", 0))], 17)
+	# personal records
+	var pr: Dictionary = M.profile
+	var rc := UI.add_card(body, "dark")
+	UI.add_label(rc, "PERSONAL RECORDS", 20, UI.AMBER)
+	var bestd: Dictionary = pr.get("best", {})
+	var fishb: Dictionary = pr.get("fish_best", {})
+	var big := ""
+	var big_cm := 0
+	for k in fishb.keys():
+		if int(fishb[k]) > big_cm:
+			big_cm = int(fishb[k])
+			big = str(k)
+	var clears: Dictionary = pr.get("vein_clears", {})
+	var most := 0
+	for k in clears.keys():
+		most = maxi(most, int(clears[k]))
+	for line in ["Best Quickdraw score: %s" % UI.n(bestd.get("quickdraw", 0)),
+			"Longest perfect streak: %s" % UI.n(pr.get("best_streak", 0)),
+			"Deepest expedition: floor %s" % UI.n(pr.get("deepest", 0)),
+			("Biggest fish: %s, %d cm" % [big, big_cm]) if big != "" else "Biggest fish: none yet",
+			"Most cleared vein: %s times" % UI.n(most),
+			"Duel win streak now: %s   -   Training Knight beaten: %s times" % [UI.n(pr.get("win_streak", 0)), UI.n(pr.get("knight_wins", 0))],
+			"Cabin likes: %s" % UI.n(pr.get("likes", 0))]:
+		UI.add_label(rc, line, 18)
 	var p: Dictionary = M.profile
 	var c := UI.add_card(body, "deep")
 	UI.add_label(c, str(p.get("username", "")), 30, UI.GOLD)
@@ -279,6 +344,14 @@ func _settings() -> void:
 		M.save_settings()
 		M.audio.refresh()
 		_set_tab("settings"))
+	var thumb := UI.add_button(c, "ONE-THUMB MODE: %s" % ("ON" if M.settings.get("one_thumb", false) else "OFF"), "teal" if M.settings.get("one_thumb", false) else "stone", 60, 22)
+	thumb.pressed.connect(func():
+		M.settings["one_thumb"] = not M.settings.get("one_thumb", false)
+		M.save_settings()
+		_set_tab("settings"))
+	UI.add_label(c, "One-thumb mode puts the STRIKE button at the bottom, nearest your thumb.", 15, UI.MUTED)
+	var ph := UI.add_button(c, "PHOTO MODE", "amber", 54, 20)
+	ph.pressed.connect(func(): M.photo_mode())
 	var intro := UI.add_button(c, "REPLAY THE INTRO", "stone", 54, 20)
 	intro.pressed.connect(func():
 		M.close_panel()
@@ -305,7 +378,7 @@ func _settings() -> void:
 			else:
 				M.error_toast(rr))
 	var c2 := UI.add_card(body, "dark")
-	UI.add_label(c2, "Pulse Network v5.0. PLS is an in-game balance earned by mining and by your phone acting as a node while you mine. It cannot be bought, sold or cashed out.", 16, UI.MUTED)
+	UI.add_label(c2, "Pulse Network v5.3. PLS is an in-game balance earned by mining and by your phone acting as a node while you mine. It cannot be bought, sold or cashed out.", 16, UI.MUTED)
 	var tut := UI.add_button(c2, "SHOW THE TUTORIAL AGAIN", "stone", 50, 18)
 	tut.pressed.connect(func():
 		await M.api.post("/me/flags", {"tutorial": false})
@@ -316,11 +389,46 @@ func _settings() -> void:
 	out.pressed.connect(func(): M.close_panel(); M.logout())
 
 
+# The journal: everything you can find, with blanks for what you have not found yet.
+func _journal() -> void:
+	var p: Dictionary = M.profile
+	var j := UI.add_card(body, "deep")
+	UI.add_label(j, "MINER'S JOURNAL", 22, UI.GOLD)
+	var gems: Dictionary = p.get("gems", {})
+	UI.add_label(j, "GEMS", 18, UI.AMBER)
+	for g in p.get("gem_names", ["amber", "garnet", "sapphire", "voidstone"]):
+		var n := int(gems.get(g, 0))
+		UI.add_label(j, ("  %s  x%d" % [str(g).capitalize(), n]) if n > 0 else "  ? ? ?", 18, GEM_COL.get(g, UI.WHITE) if n > 0 else UI.MUTED)
+	UI.add_label(j, "FISH (record size, weight)", 18, UI.AMBER)
+	var fb: Dictionary = p.get("fish_best", {})
+	var caught: Dictionary = p.get("fish", {})
+	for f in p.get("fish_names", []):
+		if fb.has(f):
+			var cm := int(fb[f])
+			var grams := int(0.012 * cm * cm * cm)
+			UI.add_label(j, "  %s - %d cm, %s g  (caught %d)" % [f, cm, UI.n(grams), int(caught.get(f, 0))], 17, UI.TEAL_L)
+		else:
+			UI.add_label(j, "  ? ? ?", 17, UI.MUTED)
+	UI.add_label(j, "DYES", 18, UI.AMBER)
+	var dyes: Array = p.get("dyes", [])
+	var parts := []
+	for k in range(DYE_NAMES.size()):
+		parts.append(DYE_NAMES[k] if dyes.has(k) else "?")
+	UI.add_label(j, "  " + ", ".join(PackedStringArray(parts)), 17, UI.WHITE)
+	UI.add_label(j, "VEIN MASTERY (bronze 100, silver 500, gold 2,000 cleared)", 18, UI.AMBER)
+	var vc: Dictionary = p.get("vein_clears", {})
+	for t in [1, 2, 3, 4]:
+		var n := int(vc.get(str(t), 0))
+		var medal := "gold" if n >= 2000 else ("silver" if n >= 500 else ("bronze" if n >= 100 else "-"))
+		UI.add_label(j, "  %s: %s cleared  (%s)" % [["", "Coal Seam", "Iron Vein", "Crystal Grotto", "Void Rift"][t], UI.n(n), medal], 17)
+
+
 func _badges() -> void:
 	var r: Dictionary = await M.api.get_json("/badges")
 	if not r.get("ok", false) or tab != "badges":
 		return
 	UI.clear(body)
+	_journal()
 	var row := UI.add_row(body, 6)
 	var home := UI.add_button(row, "MY CABIN", "amber", 56, 20)
 	home.pressed.connect(func(): M.go("cabin"))
@@ -347,6 +455,8 @@ func _badges() -> void:
 	for b in r["badges"]:
 		earned[b["id"]] = b
 	UI.add_label(body, "BADGES  (%d of %d)" % [earned.size(), r["all"].size()], 20, UI.AMBER)
+	if int(r.get("secret_left", 0)) > 0:
+		UI.add_label(body, "...and %d secret badges nobody talks about." % int(r["secret_left"]), 17, UI.VOID)
 	for b in r["all"]:
 		var got: bool = earned.has(b["id"])
 		var row2 := UI.add_row(body, 8)

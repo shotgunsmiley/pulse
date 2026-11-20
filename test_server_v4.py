@@ -3,6 +3,8 @@ Part 1 runs the server in-process (fast, lets us fake time for long scenarios).
 Part 2 runs the real HTTP server in a subprocess and plays through it like the app does.
 Run:  python test_server_v4.py
 """
+import os as _os
+_os.environ['PULSE_EXTRA_BONUSES'] = '0'   # this suite checks the exact base mining rules
 import os, sys, json, time, tempfile, importlib, subprocess, socket, urllib.request, urllib.error, hashlib, random, types, sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -552,7 +554,7 @@ def http_part():
                 time.sleep(0.05)
         out = []
         st, h = req('GET', '/health')
-        assert st == 200 and h['version'] == 5.2
+        assert st == 200 and h['version'] == 5.3
         st, r = req('POST', '/auth/register', {'username': 'HttpHero', 'password': 'secret123'})
         assert st == 200
         tok = r['token']

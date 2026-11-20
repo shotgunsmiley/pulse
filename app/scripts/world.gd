@@ -11,6 +11,7 @@ signal vein_tapped(tier: int)
 signal arrived(place: String)
 signal intro_finished
 signal examined(text: String)          # long-press on something: a line for the game log
+signal photo_tapped
 
 const MD = preload("res://scripts/model_data.gd")
 const MB = preload("res://scripts/mesh_builder.gd")
@@ -74,6 +75,17 @@ var _pressed := false
 var _press_ms := 0
 var signs: Array = []
 var headlamp: OmniLight3D = null
+var photo_mode := false
+var hidden_tier := 0        # glittering vein right now (the minimap marks it)
+var raining := false
+var rain: CPUParticles3D = null
+var merchant_here := false
+var merchant: Node3D = null
+var leaders_label: Label3D = null
+var leaders: Array = []
+var star_timer := 12.0
+var pet_busy := false
+var pick_nick := ""
 
 var flickers := []         # [{"l": OmniLight3D, "base": float, "kind": String, "seed": float}]
 var monument_light: OmniLight3D = null
@@ -288,6 +300,19 @@ func show_area(area_name: String, opts: Dictionary = {}) -> void:
 	env.adjustment_saturation = 1.12 if town else 1.05
 	if town:
 		_build_signs()
+		_build_leaders()
+		_spawn_merchant()
+		_update_rain()
+	elif rain:
+		rain.emitting = false
+		rain.visible = false
+	if area_name == "mine":
+		# crystals glow brighter at night (by the phone's clock)
+		var h := int(Time.get_datetime_dict_from_system()["hour"])
+		if h >= 20 or h < 6:
+			for f in flickers:
+				if f["kind"] == "crystal":
+					f["base"] = float(f["base"]) * 1.6
 	if area_name == "lake":
 		_build_water()
 	if area_name == "expedition":
@@ -681,6 +706,7 @@ func ore_fly(tier: int, count: int) -> void:
 
 
 func set_hidden_vein(tier: int) -> void:
+	hidden_tier = tier
 	if hidden_fx:
 		hidden_fx.queue_free()
 		hidden_fx = null
@@ -1149,6 +1175,13 @@ func _process(delta: float) -> void:
 		n.rotation.y = -a + (PI if float(b["s"]) > 0 else 0.0)
 		n.scale = Vector3(1.0, 1.0 + sin(t * 10.0 + a) * 0.6, 1.0)
 	_pet_step(delta)
+	if area == "town" and night > 0.6:
+		star_timer -= delta
+		if star_timer <= 0.0:
+			star_timer = randf_range(18.0, 45.0)
+			_shooting_star()
+	if rain and rain.visible:
+		rain.position = Vector3(hero.position.x, 9.0, hero.position.z)
 	if weather and weather.visible:
 		weather.position = Vector3(hero.position.x, 10.0, hero.position.z)
 	if bobber and line_mesh:
@@ -1191,6 +1224,14 @@ func _unhandled_input(event) -> void:
 
 
 func _tap(pos: Vector2) -> void:
+	if photo_mode:
+		photo_tapped.emit()
+		return
+	# a tap on your pet makes it do a trick
+	if pet != null and not camera.is_position_behind(pet.position + Vector3(0, 0.4, 0)):
+		if camera.unproject_position(pet.position + Vector3(0, 0.4, 0)).distance_to(pos) < 70.0:
+			pet_trick()
+			return
 	var best = null
 	var best_d := 150.0
 	for p in pickables:
@@ -1382,4 +1423,177 @@ func _examine(pos: Vector2) -> void:
 		key = "hero"
 	elif best != null:
 		key = (str(best["id"]) if best["kind"] == "place" else "vein%d" % int(best["id"]))
-	examined.emit(EXAMINE.get(key, EXAMINE["ground"]))
+	var line: String = EXAMINE.get(key, EXAMINE["ground"])
+	if key == "hero" and pick_nick != "":
+		line += " Your pickaxe, \"%s\", is ready." % pick_nick
+	examined.emit(line)
+
+
+# ================================================================== v5.3 extras
+# A glowing arc that follows the pickaxe swing (colour of the vein).
+func swing_trail(tier: int, quality: String) -> void:
+	var to := _vein_point(tier)
+	var from: Vector3 = hero.position + Vector3(0, 2.0, 0)
+	var col: Color = Color("#ffd36b") if quality == "perfect" else (ORE_COLORS.get(tier, Color.WHITE) if tier >= 3 else Color("#e8e0d0"))
+	for i in range(6):
+		var k := i / 5.0
+		var p: Vector3 = from.lerp(to, k) + Vector3(0, sin(k * PI) * 0.45, 0)
+		var tw := create_tween()
+		tw.tween_interval(k * 0.06)
+		tw.tween_callback(func(): _burst(p, col, 2, 0.4, 0.045, true, 0.28))
+
+
+func lucky_fx(tier: int) -> void:
+	var at := _vein_point(tier)
+	_burst(at, Color("#ffd36b"), 40, 6.0, 0.08, true, 1.0)
+	_burst(at, Color.WHITE, 16, 3.0, 0.05, true, 0.6)
+	var fl := OmniLight3D.new()
+	fl.light_color = Color("#ffd36b")
+	fl.omni_range = 7.0
+	fl.light_energy = 5.0
+	fl.position = at + Vector3(0, 0.5, 0)
+	area_root.add_child(fl)
+	var tw := fl.create_tween()
+	tw.tween_property(fl, "light_energy", 0.0, 0.6)
+	tw.tween_callback(fl.queue_free)
+	float_text(at + Vector3(0, 0.4, 0), "LUCKY!", Color("#ffd36b"), 3, 0.7, 1.2)
+	shake = maxf(shake, 0.2)
+
+
+# Rain in town on rainy days (the daily forecast).
+func set_rain(on: bool) -> void:
+	raining = on
+	_update_rain()
+
+
+func _update_rain() -> void:
+	if rain == null:
+		rain = CPUParticles3D.new()
+		rain.amount = 260
+		rain.lifetime = 1.1
+		rain.preprocess = 1.2
+		rain.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+		rain.emission_box_extents = Vector3(14, 0.5, 14)
+		rain.direction = Vector3(0.08, -1, 0)
+		rain.spread = 3.0
+		rain.gravity = Vector3(0, -20, 0)
+		rain.initial_velocity_min = 6.0
+		rain.initial_velocity_max = 8.0
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.03, 0.55, 0.03)
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(0.8, 0.86, 0.98, 0.75)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		bm.material = mat
+		rain.mesh = bm
+		add_child(rain)
+	var on := raining and area == "town"
+	rain.visible = on
+	rain.emitting = on
+
+
+# The weekend merchant stands by the market stalls.
+func set_merchant(on: bool) -> void:
+	merchant_here = on
+	if area == "town":
+		_spawn_merchant()
+
+
+func _spawn_merchant() -> void:
+	if merchant != null and is_instance_valid(merchant):
+		merchant.queue_free()
+		merchant = null
+	if not merchant_here or area != "town":
+		return
+	merchant = HeroScript.new()
+	area_root.add_child(merchant)
+	merchant.build({"skin": 3, "hair_style": 3, "hair_color": 4, "shirt": 8, "pants": 2, "accent": 1, "face": 4}, "starter")
+	merchant.set_tool("none")
+	var sp: Vector3 = _vec(MD.SPOTS["town_market"]["p"])
+	merchant.position = sp + Vector3(1.6, 0, 0.8)
+	merchant.rotation.y = atan2(-merchant.position.x, -merchant.position.z) + PI
+	var l := Label3D.new()
+	l.text = "Wandering Merchant"
+	l.font_size = 40
+	l.pixel_size = 0.005
+	l.modulate = Color("#ffd36b")
+	l.outline_size = 8
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.position = Vector3(0, 2.4, 0)
+	merchant.add_child(l)
+	pickables.append({"pos": merchant.position + Vector3(0, 1.2, 0), "kind": "place", "id": "market"})
+
+
+# The notice board shows this week's top three miners.
+func set_leaders(names: Array) -> void:
+	leaders = names
+	if area == "town":
+		_build_leaders()
+
+
+func _build_leaders() -> void:
+	if leaders_label != null and is_instance_valid(leaders_label):
+		leaders_label.queue_free()
+	leaders_label = null
+	if leaders.is_empty():
+		return
+	var at := Vector3.ZERO
+	for p in pickables:
+		if p["kind"] == "place" and p["id"] == "board":
+			at = p["pos"]
+	if at == Vector3.ZERO:
+		return
+	var lines := ["TOP MINERS THIS WEEK"]
+	for i in range(mini(3, leaders.size())):
+		lines.append("%d. %s" % [i + 1, str(leaders[i])])
+	leaders_label = Label3D.new()
+	leaders_label.text = "\n".join(PackedStringArray(lines))
+	leaders_label.font_size = 34
+	leaders_label.pixel_size = 0.0055
+	leaders_label.modulate = Color("#ffe6b0")
+	leaders_label.outline_size = 8
+	leaders_label.outline_modulate = Color("#2a1a0c")
+	leaders_label.billboard = BaseMaterial3D.BILLBOARD_FIXED_Y
+	leaders_label.position = at + Vector3(0, 1.3, 0)
+	area_root.add_child(leaders_label)
+
+
+# Tap your pet: it hops and spins.
+func pet_trick() -> void:
+	if pet == null or pet_busy:
+		return
+	pet_busy = true
+	var base := pet.position
+	var tw := create_tween()
+	tw.tween_property(pet, "position", base + Vector3(0, 0.7, 0), 0.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(pet, "rotation:y", pet.rotation.y + TAU, 0.4)
+	tw.tween_property(pet, "position", base, 0.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.tween_callback(func():
+		pet_busy = false
+		_burst(pet.position + Vector3(0, 0.3, 0), Color("#ffd36b"), 8, 1.5, 0.04, true, 0.5))
+	examined.emit({"golem": "Your golem does a heavy little hop.", "bat": "Your bat loops the loop.",
+		"sprite": "Your sprite spins and sparkles."}.get(pet_kind, "Your pet does a trick."))
+
+
+# A shooting star across the night sky over town.
+func _shooting_star() -> void:
+	var star := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.12, 0.12, 2.4)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = Color(1, 1, 0.92, 0.95)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bm.material = m
+	star.mesh = bm
+	var a := randf() * TAU
+	var from := Vector3(cos(a) * 40, randf_range(32, 42), sin(a) * 40)
+	var to := from + Vector3(-cos(a) * 35, -9, -sin(a) * 35).rotated(Vector3.UP, randf_range(-0.6, 0.6))
+	star.position = from
+	add_child(star)
+	star.look_at_from_position(from, to, Vector3.UP)
+	var tw := star.create_tween()
+	tw.tween_property(star, "position", to, 1.1)
+	tw.parallel().tween_property(m, "albedo_color:a", 0.0, 1.1).set_delay(0.5)
+	tw.tween_callback(star.queue_free)

@@ -73,6 +73,13 @@ var active := false
 var busy := false
 var gen := 0
 var broken_seen := {}     # gear slots already reported broken (so the warning shows once)
+var daily_row: HBoxContainer
+var cart_btn: Button
+var chest_btn: Button
+var crack_played := false
+var sess := {}            # this visit to the mine, for the recap when you leave
+const MASTERY_COL := {"bronze": Color("#d08a50"), "silver": Color("#d8dde4"), "gold": Color("#ffd36b")}
+const TRAIT_TXT := {"stubborn": "STUBBORN - tougher, +1 ore a hit", "rich": "RICH - +50% ore"}
 
 
 func init(m) -> void:
@@ -96,6 +103,18 @@ func init(m) -> void:
 	streak_label = UI.add_label(sr, "", 19, UI.AMBER)
 	event_label = UI.add_label(sr, "", 17, UI.GOLD)
 	event_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	# the daily cart and weekly chest share the streak row, so the panel never grows
+	daily_row = sr
+	cart_btn = UI.add_button(sr, "CART!", "teal", 40, 16)
+	cart_btn.custom_minimum_size = Vector2(120, 40)
+	cart_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	cart_btn.pressed.connect(_claim_cart)
+	chest_btn = UI.add_button(sr, "CHEST!", "amber", 40, 16)
+	chest_btn.custom_minimum_size = Vector2(120, 40)
+	chest_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	chest_btn.pressed.connect(_claim_chest)
+	cart_btn.visible = false
+	chest_btn.visible = false
 	var row := UI.add_row(self, 6)
 	for t in [1, 2, 3, 4]:
 		var b := UI.add_button(row, ["", "COAL", "IRON", "CRYSTAL", "VOID"][t], "stone", 50, 17)
@@ -115,7 +134,12 @@ func init(m) -> void:
 
 func on_open() -> void:
 	active = true
+	sess = {"t0": Time.get_ticks_msec(), "strikes": 0, "hits": 0, "veins": 0, "xp": 0, "gems": 0, "lucky": 0}
+	_apply_layout()
+	tier = int(M.settings.get("last_tier", tier))
 	await _load_veins()
+	if not _vein(tier).get("unlocked", false):
+		tier = 1
 	select_tier(tier, false)
 
 
@@ -123,6 +147,59 @@ func on_close() -> void:
 	active = false
 	challenge_id = ""
 	bar.setup({})
+	M.world.hero.set_glow(false)
+	# session recap
+	if int(sess.get("strikes", 0)) >= 5:
+		var mins := maxi(1, int((Time.get_ticks_msec() - int(sess["t0"])) / 60000))
+		var line := "Session: %d min, %d strikes (%d%% hits), %d veins, +%d xp" % [mins, sess["strikes"],
+			int(100.0 * float(sess["hits"]) / maxf(1.0, float(sess["strikes"]))), sess["veins"], sess["xp"]]
+		if int(sess["gems"]) > 0:
+			line += ", %d gem%s" % [sess["gems"], "" if int(sess["gems"]) == 1 else "s"]
+		M.log_msg(line, UI.TEAL_L)
+		M.toast(line, UI.TEAL_L)
+	sess = {}
+
+
+# One-thumb mode: the STRIKE button moves to the bottom of the panel, closest to the thumb.
+func _apply_layout() -> void:
+	var low: bool = M.settings.get("one_thumb", false)
+	var want := get_child_count() - 1 if low else 3
+	move_child(strike_btn, want)
+
+
+func _claim_cart() -> void:
+	cart_btn.disabled = true
+	var r: Dictionary = await M.api.post("/cart/claim", {})
+	cart_btn.visible = false
+	if not r.get("ok", false):
+		M.error_toast(r)
+		return
+	M.apply({"ore_inv": r["ore_inv"]})
+	var parts := []
+	for k in r["ore"].keys():
+		parts.append("%d %s" % [int(r["ore"][k]), UI.ore_name(k).to_lower()])
+	M.log_msg("The mine cart rattles in: %s." % ", ".join(PackedStringArray(parts)), UI.TEAL_L)
+	M.play("coin")
+	M.world.ore_fly(tier, 6)
+	M.daily["cart_ready"] = false
+
+
+func _claim_chest() -> void:
+	chest_btn.disabled = true
+	var r: Dictionary = await M.api.post("/chest/claim", {})
+	chest_btn.visible = false
+	if not r.get("ok", false):
+		M.error_toast(r)
+		return
+	M.apply(r)
+	var got: Dictionary = r["got"]
+	var what := ("a %s dye" % str(got["dye"])) if got.has("dye") else ("a %s" % str(got.get("gem", "gem")))
+	M.toast("WEEKLY CHEST: %s + 20 coal!" % what, UI.GOLD)
+	M.log_msg("You open the weekly chest: %s and 20 coal." % what, UI.GOLD)
+	M.play("rare")
+	M.vibrate_pattern("gem")
+	M.world.level_up_fx(int(M.profile.get("level", 1)))
+	M.daily["chest_ready"] = false
 
 
 func _load_veins() -> void:
@@ -135,8 +212,22 @@ func _load_veins() -> void:
 		var t := int(v["id"])
 		var b: Button = tier_btns[t]
 		UI.style_button(b, "amber" if t == tier else ("stone" if v["unlocked"] else "dark"))
-		b.text = ("" if v["unlocked"] else "LOCKED ") + ["", "COAL", "IRON", "CRYSTAL", "VOID"][t]
+		var m := str(v.get("mastery", ""))
+		b.text = ("" if v["unlocked"] else "LOCKED ") + ["", "COAL", "IRON", "CRYSTAL", "VOID"][t] + {"bronze": " *", "silver": " **", "gold": " ***"}.get(m, "")
 	info.text = "Veins today: %s" % UI.n(r.get("day_blocks", 0))
+	cart_btn.visible = bool(r.get("cart_ready", false))
+	cart_btn.disabled = false
+	chest_btn.visible = bool(M.daily.get("chest_ready", false))
+	chest_btn.disabled = false
+	# Garrick's forecast, once a day
+	var fc: Dictionary = r.get("forecast", {})
+	var today := Time.get_date_string_from_system(true)
+	if not fc.is_empty() and str(M.settings.get("forecast_day", "")) != today:
+		M.settings["forecast_day"] = today
+		M.save_settings()
+		M.log_msg("Garrick: " + str(fc.get("say", "")), Color("#ffd36b"))
+	if not fc.is_empty():
+		event_label.text = "Today: +20%% %s" % str(fc.get("ore", "")) if event_label.text == "" else event_label.text
 
 
 func _vein(t: int) -> Dictionary:
@@ -155,16 +246,24 @@ func select_tier(t: int, walk: bool = true) -> void:
 		M.play("buzz")
 		return
 	tier = t
+	M.settings["last_tier"] = t
 	for k in tier_btns.keys():
 		var vv := _vein(k)
 		UI.style_button(tier_btns[k], "amber" if k == tier else ("stone" if vv.get("unlocked", false) else "dark"))
-	vein_label.text = str(v["name"])
+	_vein_title(v)
+	crack_played = false
 	hp_bar.value = float(v["hp_left"]) / maxf(1.0, float(v["hp"]))
 	if walk and M.world.area == "mine":
 		M.world.walk_to(M.world.spot_for_vein(t), "vein")
 	elif M.world.area == "mine":
 		M.world.walk_to(M.world.spot_for_vein(t), "vein")
 	_new_challenge()
+
+
+func _vein_title(v: Dictionary) -> void:
+	var tr := str(v.get("trait", ""))
+	vein_label.text = str(v["name"]) + ("   [%s]" % tr.to_upper() if tr != "" else "")
+	vein_label.add_theme_color_override("font_color", Color("#ff9a5a") if tr == "stubborn" else (Color("#7fe3d3") if tr == "rich" else UI.GOLD))
 
 
 func _new_challenge() -> void:
@@ -250,6 +349,37 @@ func _show_result(r: Dictionary) -> void:
 	if r.get("taper", 1.0) < 1.0 and info.text.find("tired") < 0:
 		info.text = "Long day: ore x%s" % str(r["taper"])
 	w.hit_fx(tier, q)
+	if not sess.is_empty():
+		sess["strikes"] += 1
+		sess["hits"] += 0 if q == "miss" else 1
+		sess["xp"] += xp_gain
+		sess["veins"] += 1 if r.get("cleared", false) else 0
+		sess["gems"] += 1 if r.get("gem") != null else 0
+	if q != "miss":
+		# a second ping that rises with the quality, so you can hear a perfect without looking
+		M.play("clink", {"perfect": 1.38, "great": 1.18, "good": 1.0}.get(q, 1.0))
+		w.swing_trail(tier, q)
+	if r.get("lucky", false):
+		M.toast("LUCKY STRIKE!  Double ore", UI.GOLD)
+		M.log_msg("A lucky strike - double ore!", UI.GOLD)
+		M.play("rare")
+		M.vibrate_pattern("gem")
+		w.lucky_fx(tier)
+		M.garrick_once("lucky", "Ha! Some days the rock just gives.")
+	if int(r.get("first_perfect", 0)) > 0:
+		w.float_text(w.hero.position + Vector3(0, 2.3, 0), "+25 first perfect today!", UI.GOLD, 2, 0.5, 1.6)
+		M.log_msg("First perfect of the day: +25 xp.", UI.GOLD)
+	var rh := int(r.get("rhythm", 0))
+	w.hero.set_glow(rh > 0)
+	if int(r.get("rally", 0)) >= 3 and str(event_label.text).find("RALLY") < 0:
+		event_label.text = "CREW RALLY +10%"
+		M.log_msg("Your crew is mining together: +10% ore.", UI.TEAL_L)
+	if int(r.get("comeback", 0)) > 0:
+		info.text = "Welcome back: double xp %d min" % maxi(1, int(r["comeback"]) / 60)
+	if r.get("dye") != null:
+		M.toast("You found %s DYE! Try it in ME > LOOK." % str(r["dye"]).to_upper(), UI.GOLD)
+		M.log_msg("You found a pot of %s dye." % str(r["dye"]).to_lower(), UI.GOLD)
+		M.play("rare")
 	if q == "miss":
 		text = "MISS - the pick glanced off the rock."
 		M.play("thud")
@@ -258,7 +388,7 @@ func _show_result(r: Dictionary) -> void:
 	else:
 		var got := int(r["ore_gained"]) + int(r.get("bonus_ore", 0))
 		text += "  +%s %s   (%s damage)" % [UI.n(got), UI.ore_name(str(r["ore"])), UI.n(r["damage"])]
-		M.vibrate(30 if q == "perfect" else 18)
+		M.vibrate_pattern(q)
 		w.ore_fly(tier, mini(got, 8))
 		w.xp_drop(tier, xp_gain, got, UI.ore_name(str(r["ore"])).to_lower())
 		M.log_msg("%s strike: +%d %s, +%d xp" % [q.capitalize(), got, UI.ore_name(str(r["ore"])).to_lower(), xp_gain], colors.get(q, UI.WHITE))
@@ -267,12 +397,19 @@ func _show_result(r: Dictionary) -> void:
 	var combo := float(r.get("combo", 1.0))
 	w.set_combo(int(round((combo - 1.0) / 0.25)))
 	if streak >= 3:
-		streak_label.text = "STREAK %d  -  x%s ore" % [streak, str(snappedf(combo, 0.01))]
+		streak_label.text = "STREAK %d  -  x%s ore" % [streak, str(snappedf(combo, 0.01))] + ("   RHYTHM +1" if rh > 0 else "")
 	else:
 		streak_label.text = ""
+	if q == "perfect" and streak in [10, 25, 50, 100]:
+		M.toast("%d PERFECT IN A ROW!" % streak, UI.GOLD)
+		M.log_msg("%d perfect strikes in a row!" % streak, UI.GOLD)
+		M.play("levelup", 1.2)
+		w.level_up_fx(streak)
 	if r.get("gem") != null:
 		M.toast("A %s glitters in the rubble!  +1 gem" % str(r["gem"]).to_upper(), UI.GOLD)
 		M.log_msg("You found a %s!" % str(r["gem"]), UI.GOLD)
+		M.vibrate_pattern("gem")
+		M.garrick_once("gem", "A gem! Keep it, trade it, or put it on your cabin shelf.")
 		M.play("rare")
 		M.vibrate(90)
 	for b in r.get("new_badges", []):
@@ -280,9 +417,27 @@ func _show_result(r: Dictionary) -> void:
 	result.text = text
 	result.add_theme_color_override("font_color", colors.get(q, UI.WHITE))
 	hp_bar.value = float(r["vein_hp"]) / maxf(1.0, float(r["vein_max"]))
+	if hp_bar.value < 0.25 and not crack_played and not r.get("cleared", false):
+		crack_played = true
+		M.play("thud", 0.55)          # the rock creaks: one or two more hits
 	for v in veins:
 		if int(v["id"]) == tier:
 			v["hp_left"] = r["vein_hp"]
+			v["hp"] = r["vein_max"]
+			if r.get("cleared", false):
+				var was_trait := str(v.get("trait", ""))
+				v["trait"] = str(r.get("trait", ""))
+				v["clears"] = int(r.get("clears", 0))
+				crack_played = false
+				_vein_title(v)
+				if v["trait"] != "" and v["trait"] != was_trait:
+					M.log_msg("The next vein looks %s." % TRAIT_TXT.get(v["trait"], v["trait"]).to_lower(), Color("#ff9a5a") if v["trait"] == "stubborn" else UI.TEAL_L)
+				var c := int(v["clears"])
+				if c in [100, 500, 2000]:
+					var medal: String = {100: "BRONZE", 500: "SILVER", 2000: "GOLD"}[c]
+					M.toast("%s MASTERY: %s (%d cleared)" % [medal, str(v["name"]).to_upper(), c], UI.GOLD)
+					M.log_msg("You earned %s mastery of the %s." % [medal.to_lower(), str(v["name"]).to_lower()], UI.GOLD)
+					_load_veins()
 	if r.get("cleared", false):
 		M.toast("VEIN CLEARED!  +%s PLS" % UI.n(r["pls"]) if int(r["pls"]) > 0 else "VEIN CLEARED!", UI.GOLD)
 		M.play("coin")
@@ -294,6 +449,8 @@ func _show_result(r: Dictionary) -> void:
 		M.play("levelup")
 		M.vibrate(120)
 		w.level_up_fx(int(r["level"]))
+		M.vibrate_pattern("level")
+		M.garrick_once("level", "Look at you! Every few levels a new vein opens up.")
 		M.log_msg("Congratulations - you reached mining level %s!" % UI.n(r["level"]), UI.GOLD)
 		_load_veins()
 	var gear: Dictionary = r.get("gear", {})
@@ -301,6 +458,7 @@ func _show_result(r: Dictionary) -> void:
 		var broken: bool = gear[slot].get("broken", false)
 		if broken and not broken_seen.get(slot, false):
 			M.toast("Your %s broke! Repair it at the Forge." % str(gear[slot]["name"]), UI.RED)
+			M.garrick_once("broken", "Snapped it, did you? The Forge mends gear for ore.")
 			M.log_msg("Your %s broke. Repair it at the Forge (mostly ore)." % str(gear[slot]["name"]).to_lower(), UI.RED)
 		broken_seen[slot] = broken
 

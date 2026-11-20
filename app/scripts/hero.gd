@@ -24,6 +24,8 @@ var tool := "pickaxe"        # "pickaxe", "sword" or "none"
 var stance := false          # holding the en-garde pose (duels)
 var home_yaw := 0.0          # facing to return to after a duel knockdown
 var shadow: MeshInstance3D = null    # soft round shadow on the ground (stays flat when the body falls)
+var glow_light: OmniLight3D = null   # rhythm glow on the tool / duel win-streak glow on the sword
+const CREW_COLORS := ["#3f7a6e", "#b8902e", "#a8552a", "#6e4e9a", "#2e6fb0", "#b03a3a", "#3a8a3a", "#d0d0c8"]
 static var _shadow_mat: StandardMaterial3D = null
 
 
@@ -44,7 +46,7 @@ func build(appearance: Dictionary, tier: String) -> void:
 		int(slots["hair"]): Color(A["hair_color"][_pick(appearance, "hair_color", A["hair_color"].size())]),
 		int(slots["shirt"]): Color(A["shirt"][_pick(appearance, "shirt", A["shirt"].size())]),
 		int(slots["pants"]): Color(A["pants"][_pick(appearance, "pants", A["pants"].size())]),
-		int(slots["accent"]): Color(A["accent"][_pick(appearance, "accent", A["accent"].size())]),
+		int(slots["accent"]): Color(CREW_COLORS[int(appearance["crew_color"])]) if int(appearance.get("crew_color", -1)) >= 0 and int(appearance.get("crew_color", -1)) < CREW_COLORS.size() else Color(A["accent"][_pick(appearance, "accent", A["accent"].size())]),
 		int(slots["pick"]): Color(picks.get(tier, picks["starter"])),
 	}
 	var rig: Dictionary = MD.HERO_RIG.duplicate(true)
@@ -83,6 +85,25 @@ func build(appearance: Dictionary, tier: String) -> void:
 	set_tool(tool)
 	_rest_pose()
 	_make_shadow()
+	glow_light = null
+
+
+# A soft glow on the held tool: rhythm on the pickaxe, a win streak on the sword.
+func set_glow(on: bool, color: Color = Color("#ffd36b")) -> void:
+	var holder: String = "sword" if tool == "sword" else "pickaxe"
+	if not parts.has(holder):
+		return
+	if on:
+		if glow_light == null or not is_instance_valid(glow_light):
+			glow_light = OmniLight3D.new()
+			glow_light.omni_range = 1.4
+			glow_light.position = Vector3(0, 0.6, 0)
+			parts[holder].add_child(glow_light)
+		glow_light.light_color = color
+		glow_light.light_energy = 1.6
+	elif glow_light != null and is_instance_valid(glow_light):
+		glow_light.queue_free()
+		glow_light = null
 
 
 # A soft dark disc under the feet: grounds the character the way old-school games did.

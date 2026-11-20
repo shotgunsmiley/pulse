@@ -31,10 +31,16 @@ var gen := 0
 var torches: Array = []
 var shake := 0.0
 var cam_base := Vector3(0, 1.25, 3.5)
+var cheers := 0
+var close_finish := false     # set when the round tally was close: the last blow plays in slow motion
+var me_look_d := {}
+var op_look_d := {}
 
 
 func setup(m, me_look: Dictionary, me_tier: String, opp_name: String, op_look: Dictionary) -> void:
 	M = m
+	me_look_d = me_look
+	op_look_d = op_look
 	op_name = opp_name
 	me_name = str(M.profile.get("username", "You")) if M and M.profile else "You"
 	stretch = true
@@ -123,6 +129,24 @@ func _start_guard() -> void:
 		return
 	me.en_garde()
 	op.en_garde()
+	# a win streak of 3+ makes the sword glow
+	if int(me_look_d.get("win_streak", 0)) >= 3:
+		me.set_glow(true, Color("#ff9a40"))
+	if int(op_look_d.get("win_streak", 0)) >= 3:
+		op.set_glow(true, Color("#ff9a40"))
+	# the opponent's taunt, then their title
+	var taunt := str(op_look_d.get("taunt", ""))
+	if taunt != "":
+		_say("%s: \"%s\"" % [op_name, taunt], Color("#ff8a6a"))
+	elif str(op_look_d.get("title", "")) != "":
+		_say("%s the %s" % [op_name, str(op_look_d["title"])], Color("#ff8a6a"))
+
+
+func set_rivalry(rv: Dictionary) -> void:
+	if not rv.get("rival", false) or names == null:
+		return
+	var l: Label = names.get_child(1)
+	l.text = "%s  [RIVAL %d-%d]" % [op_name, int(rv.get("wins", 0)), int(rv.get("losses", 0))]
 
 
 func _place() -> void:
@@ -373,6 +397,23 @@ func round_winner(a: int, b: int) -> String:
 	return "me" if a < b else "op"
 
 
+func _exit_tree() -> void:
+	Engine.time_scale = 1.0       # never leave the game in slow motion
+
+
+static func tally_margin(my_rts: Array, op_rts: Array) -> int:
+	var a := 0
+	var b := 0
+	for i in range(mini(my_rts.size(), op_rts.size())):
+		var x := int(my_rts[i])
+		var y := int(op_rts[i])
+		if x > 0 and (y <= 0 or x + 8 < y):
+			a += 1
+		elif y > 0 and (x <= 0 or y + 8 < x):
+			b += 1
+	return absi(a - b)
+
+
 static func tally_winner(my_rts: Array, op_rts: Array) -> String:
 	var a := 0
 	var b := 0
@@ -419,6 +460,11 @@ func replay(my_rts: Array, op_rts: Array, final_winner: String = "") -> void:
 	if not is_inside_tree():
 		return
 	var champ := final_winner if final_winner != "" else ("me" if tally["me"] > tally["op"] else ("op" if tally["op"] > tally["me"] else "draw"))
+	close_finish = absi(int(tally["me"]) - int(tally["op"])) <= 1
+	if cheers > 0:
+		_sparks(Vector3(0, 2.4, -1.5), Color("#ffd36b"), mini(60, 10 + cheers * 4))
+		_say("%d spectators cheer!" % cheers, Color("#ffd36b"))
+		await _pause(0.8)
 	await finale(champ)
 
 
@@ -432,7 +478,12 @@ func finale(champ: String) -> void:
 	await _pause(0.4)
 	if not is_inside_tree():
 		return
+	# a close duel ends in slow motion
+	var slow := close_finish
+	if slow:
+		Engine.time_scale = 0.35
 	await strike(champ)
+	Engine.time_scale = 1.0
 	var w2 = me if champ == "me" else op
 	await w2.return_to(ME_HOME if champ == "me" else OP_HOME)
 	# turn three-quarters to the crowd for the victory pose

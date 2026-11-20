@@ -49,7 +49,14 @@ func _render() -> void:
 		var stars := ""
 		for i in range(int(g.get("stars", 0))):
 			stars += "*"
-		UI.add_label(card, "%s %s" % [str(g["name"]), stars], 24, UI.TEAL_L if not g["broken"] else UI.RED)
+		var nick := str(g.get("nick", ""))
+		var head := UI.add_row(card, 6)
+		UI.add_label(head, ("\"%s\"  (%s) %s" % [nick, str(g["name"]), stars]) if nick != "" else "%s %s" % [str(g["name"]), stars], 24, UI.TEAL_L if not g["broken"] else UI.RED)
+		var nb := UI.add_button(head, "NAME", "stone", 44, 16)
+		nb.custom_minimum_size = Vector2(110, 44)
+		nb.size_flags_horizontal = Control.SIZE_SHRINK_END
+		var name_slot: String = slot
+		nb.pressed.connect(func(): _name_gear(name_slot, nick))
 		UI.add_label(card, SLOT_HELP[slot] + ("   BROKEN - no bonus until repaired" if g["broken"] else ""), 18, UI.MUTED)
 		var frac := float(g["dur"]) / maxf(1.0, float(g["max_dur"]))
 		UI.add_bar(card, frac, UI.GREEN if frac > 0.3 else UI.RED, 14)
@@ -128,3 +135,25 @@ func _act(path: String, body: Dictionary, ok_text: String) -> void:
 		_render()
 	else:
 		M.error_toast(r)
+
+
+# Name your gear: up to 16 letters. The name shows here and when you examine yourself.
+func _name_gear(slot: String, current: String) -> void:
+	var card := UI.add_card(list, "deep")
+	list.move_child(card, 0)
+	UI.add_label(card, "Name your %s" % slot, 20, UI.AMBER)
+	var inp := UI.add_input(card, "e.g. Old Betsy")
+	inp.text = current
+	inp.max_length = 16
+	var row := UI.add_row(card, 6)
+	var ok := UI.add_button(row, "SAVE NAME", "amber", 50, 18)
+	var cancel := UI.add_button(row, "CANCEL", "stone", 50, 18)
+	cancel.pressed.connect(func(): card.queue_free())
+	ok.pressed.connect(func():
+		var r: Dictionary = await M.api.post("/gear/name", {"slot": slot, "name": inp.text.strip_edges()})
+		if r.get("ok", false):
+			M.apply(r)
+			M.toast("Named it!", UI.GOLD)
+			on_open()
+		else:
+			M.error_toast(r))
